@@ -6,6 +6,7 @@ psycopg-binary==3.3.4
 httpx==0.28.1
 PyYAML==6.0.3
 tzdata==2026.2
+pypdf==6.11.0
 greenlet==3.5.5
 typing_extensions==4.15.0
 Mako==1.4.1
