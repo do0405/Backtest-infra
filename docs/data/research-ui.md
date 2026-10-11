@@ -46,6 +46,16 @@ tested source and built files copied back from the temporary workspace.
 8. Run a stable screen of the chosen subset at its last declared session. Basis,
    ranked scores, eligible/excluded counts and explicit exclusion reasons remain
    visible. It is not a verified historical whole-universe screen.
+9. Inspect FIFO closed portions separately from open positions. Select a price
+   benchmark explicitly from the same saved dataset/market/currency. The line
+   is normalized at the first strategy NAV and has zero costs; it is not a
+   dividend total return or modeled buy-and-hold execution. Missing benchmark
+   sessions remain gaps and block aggregate relative return; carried strategy
+   marks also block that comparison. Sortino/Calmar and exposure assumptions are
+   available alongside the original metrics.
+10. Download result/input/analysis JSON and decision/selection, fill and closed
+    portion CSV. Files retain original result/data identifiers and exact values;
+    downloads do not change saved results or call the providers.
 
 Results retain the original target, immutable input/result identity, engine and
 code fingerprints, date conventions, modeling assumptions and data-quality
@@ -72,7 +82,7 @@ the saved-result ID input and replayed against the same immutable input.
 
 ## Validation
 
-Sixteen meaningful frontend tests cover exact numerical strings, chart admission of
+Twenty meaningful frontend tests cover exact numerical strings, chart admission of
 nonfinite/malformed values and explicit date gaps, distinct trace stage filtering,
 full-window versus boundary input references, strict selection payloads and
 explicit feature mapping, API/network/fixture/empty-input failures, and restoring
@@ -89,3 +99,9 @@ selectors are scoped to `.table-wrap`, preserving the chart renderer's internal
 table sizing. The production build
 uses the current v5 chart API (`addSeries` and
 `createSeriesMarkers`). Chart attribution links to TradingView.
+
+The four report/benchmark follow-up checks cover explicit benchmark selection,
+source/cost distinctions, immutable download links, result identity validation
+and stale report clearing, and NAV comparison lines preserving null sessions
+without affecting ordinary price candles. Report loading errors leave the
+original saved result, ledger and trace accessible.

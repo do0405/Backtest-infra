@@ -175,3 +175,41 @@ is exactly 100,100,106,58,58 for this fixture. With fee and slippage both 100 bp
 framework execution prices are 15.15 and 7.92, fees 0.909 and 0.4752, final cash
 55.2358 within the predeclared float tolerance. A same-session two-asset rotation
 also sells A before using the framework cash proceeds to buy B.
+
+## Read-only post-run analysis
+
+`evaluation/reporting.py` produces a separate content-addressed analysis over a
+verified saved result and its exact dataset. It does not replace the framework,
+modify original results or enter the engine code fingerprint. Original same-code
+replay remains compatible with this reporting/API/UI-only extension.
+
+FIFO attribution records entry/exit ledger indices/sequences, quantities, prices,
+allocated entry/exit fees and tax, gross/net profit and calendar holding days.
+Partial exits are closed entry-lot portions, not whole position episodes. The
+final portion receives the remaining fee/tax balance so repeated fractions do
+not discard cost. Open quantities and residual entry cost remain separate.
+Slippage is already reflected in execution prices and is not subtracted twice.
+Profit factor has no value without realized losses; no closed portion gives a
+null win rate rather than a manufactured zero.
+
+Sortino uses a zero per-session target and downside squares divided by all
+declared session returns, annualized with sqrt(252). Calmar divides elapsed-day
+CAGR by absolute maximum drawdown. Zero downside/drawdown and missing exposures
+have explicit null reasons. Drawdown duration is calendar days from the most
+recent equal-or-higher peak through recovery or the final session. Exposure
+means/fractions weight declared grid sessions equally. These are descriptive
+in-sample metrics; provisional calendars and carried marks retain their flags.
+
+The explicit benchmark is a normalized declared close-price series with zero
+costs and no execution model. Its initial value equals the first strategy NAV.
+Original market/currency, exact date grid, basis/adjustments and observation refs
+are retained. Missing dates remain null. Any benchmark gap or strategy carried
+mark blocks aggregate relative performance. This does not implement a dividend
+total-return benchmark or certify an ETF proxy as its underlying index.
+
+Additional scope still requires separate contracts/evidence: versioned broker
+tax/spread/minimum-fee and decision-time liquidity caps; action/dividend/delisting
+cash/share processing; FX and asynchronous market valuation; financial-factor
+step functions; registry-backed OOS/walk-forward trial/holdout history; verified
+historical index/member weights and lifecycle. Nothing in this report certifies
+those missing capabilities from partial price data.

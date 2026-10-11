@@ -32,6 +32,22 @@ def _original_row(session,table,condition):
     return result
 
 
+def _original_rows(session, table, column, identities, *, batch_size=1000):
+    """Bound FK reads without one round trip per catalog member."""
+    from decimal import Decimal
+    identities=list(dict.fromkeys(identities))
+    columns=[cast(c,Text).label(c.name) if isinstance(c.type,JSON) else c for c in table.c]
+    result=[]
+    for offset in range(0,len(identities),batch_size):
+        for row in session.execute(select(*columns).where(column.in_(identities[offset:offset+batch_size]))).mappings():
+            value=dict(row)
+            for c in table.c:
+                if isinstance(c.type,JSON) and value[c.name] is not None:
+                    value[c.name]=json.loads(value[c.name],parse_float=Decimal)
+            result.append(value)
+    return result
+
+
 def export_delta(session, roots, output_root, *, stream_id, sequence, scope, checkpoint=None,
                  previous_bundle_id=None, raw_root=None, max_rows=100_000, already_exported=None):
     """Export explicit original row IDs and all their recursively referenced parents."""
@@ -39,31 +55,32 @@ def export_delta(session, roots, output_root, *, stream_id, sequence, scope, che
     for name, ids in roots.items():
         if name not in registry: raise ValueError("table outside source allowlist")
         table = registry[name]
-        for identity in ids:
-            if (name,identity) in known:continue
-            value = _original_row(session,table,list(table.primary_key.columns)[0] == identity)
-            if value is None: raise ValueError("export root ID missing")
-            pending.append((name, dict(value)))
+        requested=set(identity for identity in ids if (name,identity) not in known)
+        rows=_original_rows(session,table,list(table.primary_key.columns)[0],requested)
+        if {_pk(table,value) for value in rows}!=requested:raise ValueError("export root ID missing")
+        pending.extend((name,value) for value in rows)
     while pending:
-        name, values = pending.pop(); table = registry[name]; identity = _pk(table, values)
-        if (name, identity) in found or (name,identity) in known: continue
-        if len(found) >= max_rows: raise ValueError("export row bound exceeded")
-        validate_row(wire_row({"table": name, "values": values})); found[(name, identity)] = values
-        for fk in table.foreign_keys:
-            child_value = values[fk.parent.name]
-            if child_value is None: continue
-            parent_name = fk.column.table.name
-            if parent_name not in registry: raise ValueError("parent outside source allowlist")
-            if fk.column.primary_key and ((parent_name,child_value) in known or (parent_name,child_value) in found):continue
-            parent = _original_row(session,registry[parent_name],fk.column == child_value)
-            if parent is None: raise ValueError("source parent missing")
-            pending.append((parent_name, dict(parent)))
-        for parent_name,parent_id in logical_parents({'table':name,'values':values}):
-            if (parent_name,parent_id) in known or (parent_name,parent_id) in found:continue
-            parent_table=registry[parent_name]
-            parent=_original_row(session,parent_table,list(parent_table.primary_key.columns)[0]==parent_id)
-            if parent is None:raise ValueError('audited lineage parent missing')
-            pending.append((parent_name,dict(parent)))
+        references={};wave=pending;pending=[]
+        for name,values in wave:
+            table=registry[name];identity=_pk(table,values)
+            if (name,identity) in found or (name,identity) in known:continue
+            if len(found)>=max_rows:raise ValueError("export row bound exceeded")
+            validate_row(wire_row({"table":name,"values":values}));found[(name,identity)]=values
+        for name,values in wave:
+            table=registry[name]
+            for fk in table.foreign_keys:
+                target=values[fk.parent.name];parent_name=fk.column.table.name
+                if target is None:continue
+                if parent_name not in registry:raise ValueError("parent outside source allowlist")
+                if fk.column.primary_key and ((parent_name,target) in known or (parent_name,target) in found):continue
+                references.setdefault((parent_name,fk.column.name),set()).add(target)
+            for parent_name,target in logical_parents({'table':name,'values':values}):
+                if (parent_name,target) not in known and (parent_name,target) not in found:
+                    references.setdefault((parent_name,list(registry[parent_name].primary_key.columns)[0].name),set()).add(target)
+        for (name,column_name),requested in references.items():
+            table=registry[name];rows=_original_rows(session,table,table.c[column_name],requested)
+            if {value[column_name] for value in rows}!=requested:raise ValueError("source parent missing")
+            pending.extend((name,value) for value in rows)
     raw_files = {}
     for (name, identity), values in found.items():
         if name == "raw_object":

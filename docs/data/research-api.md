@@ -26,6 +26,18 @@ inputs are bounded and registered; there is no code or SQL upload.
   selection, pending orders, actual fills and closing holdings remain separate.
 * `GET /api/results/HASH`, `POST /api/results/HASH/replay`: exact saved result and
   repeat execution against its immutable input. Code/input mismatch fails replay.
+* `GET /api/results/HASH/analysis?benchmark_series_key=HASH`: optional explicit
+  saved-input series for a reproducible post-run report. The report binds the
+  original result/input and reporting code with its own analysis_id. It includes
+  FIFO closed portions, remaining lots, realized net PnL/win rate/profit factor,
+  Sortino/Calmar, drawdown duration and exposure measures. An omitted benchmark
+  is not replaced with an arbitrary security or index.
+* `GET /api/results/HASH/export?format=result|dataset|analysis|decisions|ledger|closed_portions`:
+  attachment download of exact result/input/analysis JSON or UTF-8 CSV. Optional
+  benchmark_series_key applies to the analysis JSON. Every CSV row retains
+  result_id/dataset_id; compound trace evidence remains a JSON cell. Formula-like
+  text is prefixed with an apostrophe, while signed numerical strings are retained.
+  All downloads verify the saved result and perform no SQL or provider calls.
 * `POST /api/screen`: dataset_id,basis,feature,top_n returns stable selected subset
   rows and explicit exclusions. Original target is retained; this is not a
   historically complete universe screen.
@@ -33,3 +45,11 @@ inputs are bounded and registered; there is no code or SQL upload.
 KR and US currencies run separately. Unknown corporate-action coverage, model
 costs, liquidity and tax assumptions are visible in each result. Calendar gaps
 are never compressed. A provider calendar is labeled as a broker declaration.
+
+The optional benchmark normalizes one declared close series to the first strategy
+NAV on exactly the saved session grid. It is a zero-cost price comparison, not
+a modeled buy-and-hold fill, total-return index or independent provider consensus.
+The strategy retains its modeled fees/slippage. Basis/adjustments/source remain
+visible. Missing benchmark dates are null without carrying/compression; the
+aggregate relative return is unavailable when any benchmark session is missing
+or the strategy carries stale marks. Same market/currency is required.

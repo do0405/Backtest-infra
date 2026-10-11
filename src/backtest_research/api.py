@@ -1,12 +1,13 @@
 """Loopback-only research API. Trusted SQL projections, registered strategies only."""
 from datetime import date,datetime,timezone
 from decimal import Decimal,DecimalException
+import json
 from pathlib import Path
 import threading
 from urllib.parse import urlsplit
 from typing import Annotated
 from fastapi import FastAPI,HTTPException,Query,Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel,ConfigDict,Field,field_validator
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,6 +16,7 @@ from .engines import run_backtest,EngineUnavailable,UnsupportedResearchInput
 from .features import compute_price_features
 from .results import ImmutableResultStore,replay_result
 from .screening import screen_subset
+from .evaluation.reporting import build_analysis,export_csv
 
 HEX='^[0-9a-f]{64}$'
 
@@ -145,6 +147,40 @@ def create_app(*,projector=None,directory=None,frontend=None):
     def screen(body:ScreenRequest):return screen_subset(load(body.dataset_id),basis=body.basis,feature=body.feature,top_n=body.top_n)
     @app.get('/api/results/{identifier}')
     def result(identifier:str):return results.get(identifier)
+    @app.get('/api/results/{identifier}/analysis')
+    def analysis(identifier:str,benchmark_series_key:str|None=Query(default=None,pattern=HEX)):
+        saved=results.get(identifier)
+        return build_analysis(saved,load(saved['dataset_id']),benchmark_series_key=benchmark_series_key)
+    @app.get('/api/results/{identifier}/export')
+    def export(identifier:str,format:str=Query(default='result',pattern='^(result|dataset|analysis|decisions|ledger|closed_portions)$'),
+               benchmark_series_key:str|None=Query(default=None,pattern=HEX)):
+        saved=results.get(identifier)
+        # Result-store validation bounds the filename to an immutable 64-hex ID.
+        if format in {'result','dataset','analysis'}:
+            content=saved if format=='result' else wire(load(saved['dataset_id'])) if format=='dataset' else build_analysis(saved,load(saved['dataset_id']),benchmark_series_key=benchmark_series_key)
+            body=json.dumps(content,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
+            extension,media='json','application/json'
+        else:
+            if format=='decisions':
+                rows=saved['selection_trace']
+                fields=['result_id','dataset_id','session','security_id','raw_series_key','feature_series_key',
+                    'eligible','exclusion_reason','rank','score','candidate_selected','selected','target_weight',
+                    'rebalance_due','feature_values','feature_statuses','decision_reasons','pending_target',
+                    'actual_fills','execution_events','actual_holding_quantity','actual_holding_weight',
+                    'actual_held_sessions','feature_input_windows','input_observation_refs']
+            elif format=='ledger':
+                rows=saved['ledger']
+                fields=['result_id','dataset_id','sequence','session','signal_session','security_id','raw_series_key',
+                    'quantity','raw_open','price','fee','slippage_cost','tax']
+            else:
+                rows=build_analysis(saved,load(saved['dataset_id']))['trades']['closed_portions']
+                fields=['result_id','dataset_id','security_id','raw_series_key','quantity','entry_session','exit_session',
+                    'entry_sequence','exit_sequence','entry_ledger_index','exit_ledger_index','entry_price','exit_price',
+                    'entry_fee','exit_fee','entry_tax','exit_tax','gross_pnl','net_pnl','net_return','holding_calendar_days']
+            body=export_csv((dict(row,result_id=saved['result_id'],dataset_id=saved['dataset_id']) for row in rows),fields)
+            extension,media='csv','text/csv'
+        return Response(body,media_type=media,headers={'Content-Disposition':f'attachment; filename="{identifier}-{format}.{extension}"',
+            'Cache-Control':'no-store'})
     @app.post('/api/results/{identifier}/replay')
     def replay(identifier:str):
         if not gate.acquire(blocking=False):raise HTTPException(409,'research_run_in_progress')

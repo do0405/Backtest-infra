@@ -15,6 +15,7 @@ from .folder import FolderTransport
 from .planner import validate_ownership,CORE_SOURCES
 from .registry import tables
 from .sql import export_deltas, import_bundle
+from .identity import restore_raw_identities, snapshot_raw_identities
 
 
 def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, output_root,
@@ -24,14 +25,18 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
               source_handlers=None,source_handler_budget_seconds=120):
     slots = validate_ownership(ownership)
     if not 0 < budget_seconds <= 14400: raise ValueError("bounded remote execution window required")
+    core_slots=[s for s in slots if s['source'] in CORE_SOURCES and s.get('handler')!='supplier_adjusted']
     reserved_post=min(postprocess_budget_seconds,budget_seconds/5) if postprocess else 0
-    reserved_handlers=min(source_handler_budget_seconds,budget_seconds/3) if source_handlers else 0
+    handler_ceiling=budget_seconds/3 if core_slots else budget_seconds-reserved_post
+    reserved_handlers=min(source_handler_budget_seconds,handler_ceiling) if source_handlers else 0
     if reserved_post<0 or reserved_handlers<0:raise ValueError('bounded processing reservation required')
     deadline = time.monotonic() + budget_seconds; checkpoint = dict(checkpoint or {})
     completed = set(checkpoint.get("completed_task_ids", [])); registry = tables()
     for path in incoming_bundles:
         with transaction(engine) as session: import_bundle(session, path, raw_root=raw_root)
     with transaction(engine) as session:
+        if 'raw_identity_index' in checkpoint:
+            restore_raw_identities(session, checkpoint['raw_identity_index'], authority='new_remote_ephemeral_database')
         restore_tasks(session,checkpoint.get('task_state',[]),owned_sources={s['source'] for s in slots},authority='new_remote_ephemeral_database')
     # Commit portable queue restoration before dynamic discovery/planning reads.
     # The planner may return new current-day work while old jobs remain pending.
@@ -54,7 +59,6 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
             task_jobs[identity] = job.id
     outcomes = []
     from ..ingestion.supervisor import run_collection
-    core_slots=[s for s in slots if s['source'] in CORE_SOURCES and s.get('handler')!='supplier_adjusted']
     for position,slot in enumerate(core_slots):
         remaining = (deadline - time.monotonic() - reserved_post - reserved_handlers)/(len(core_slots)-position)
         if remaining <= 0: break
@@ -84,6 +88,7 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
         portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
         durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes'}},**postprocess_state,
                               "version": 2, "completed_task_ids": sorted(completed), "task_state":portable,
+                              **({'raw_identity_index':snapshot_raw_identities(session)} if 'raw_identity_index' in checkpoint else {}),
                               "unfinished_task_ids": sorted(j.identity_hash for j in all_owned if j.status not in {'succeeded','superseded'}),
                               "completed_through":refresh_watermarks(all_owned,checkpoint.get('completed_through',{}),owned_sources={s['source'] for s in slots}),
                               "data_export_cursor":{"stream_id":stream_id,"sequence":sequence,"previous_bundle_id":previous_bundle_id},

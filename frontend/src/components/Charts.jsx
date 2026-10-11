@@ -4,7 +4,7 @@ import { chartCandles, chartLine } from '../model.js';
 import { Empty } from './Shared.jsx';
 
 const emptyData = [];
-export function ResearchChart({ kind = 'price', bars = emptyData, sessions = emptyData, rows = emptyData, features, selectedSession, onSessionChange }) {
+export function ResearchChart({ kind = 'price', bars = emptyData, sessions = emptyData, rows = emptyData, benchmarkRows = emptyData, features, selectedSession, onSessionChange }) {
   const chartHeight = kind === 'drawdown' ? 180 : 320;
   const container = useRef(null);
   const chartState = useRef(null);
@@ -38,6 +38,10 @@ export function ResearchChart({ kind = 'price', bars = emptyData, sessions = emp
         main = chart.addSeries(AreaSeries, { lineColor: drawdown ? '#ba6770' : '#087f74', topColor: drawdown ? '#fae7e8' : '#cde9e3', bottomColor: '#ffffff', lineWidth: 2, lineType: LineType.WithGaps, title: drawdown ? '낙폭 (비율)' : '자산 가치' });
         data = chartLine(rows, drawdown ? 'drawdown' : 'nav');
         main.setData(data);
+        if (!drawdown && benchmarkRows.length) {
+          const benchmark = chart.addSeries(LineSeries, { color: '#d4a34d', lineWidth: 2, lineType: LineType.WithGaps, title: '선택 가격 기준 · 비용 0' });
+          benchmark.setData(chartLine(benchmarkRows, 'nav'));
+        }
       }
       const markers = createSeriesMarkers(main, []);
       chartState.current = { chart, main, markers, data };
@@ -49,7 +53,7 @@ export function ResearchChart({ kind = 'price', bars = emptyData, sessions = emp
       chart.timeScale().fitContent();
     } catch { setError('이 자료의 수치 또는 날짜로 차트를 그릴 수 없습니다. 원본 수치 표를 확인하세요.'); }
     return () => { chartState.current = null; chart.remove(); };
-  }, [kind, bars, sessions, rows, features]);
+  }, [kind, bars, sessions, rows, benchmarkRows, features]);
   useEffect(() => {
     const state = chartState.current;
     if (!state) return;

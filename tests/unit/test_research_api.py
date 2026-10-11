@@ -86,3 +86,35 @@ def test_scheme_and_invalid_strategy_numbers_are_rejected(tmp_path):
         response=client.post('/api/backtests',json={'dataset_id':'a'*64,'raw_series_keys':['b'*64],
             'parameters':{'allocation':value}})
         assert response.status_code==422
+
+
+def test_read_only_derived_analysis_and_downloads_preserve_saved_result(tmp_path):
+    import csv
+    import io
+    from backtest_research.engines import run_backtest
+    from backtest_research.results import ImmutableResultStore
+    client = TestClient(create_app(projector=Projector(), directory=tmp_path))
+    data = fixture()
+    DatasetStore(tmp_path/'datasets').put(data)
+    original = run_backtest(data, raw_series_keys=[data.series[0].key], initial_cash='100',
+                            parameters={'fast_period': 1, 'slow_period': 2})
+    store = ImmutableResultStore(tmp_path/'results')
+    store.put(original)
+    report = client.get(f"/api/results/{original['result_id']}/analysis", params={'benchmark_series_key': data.series[0].key})
+    assert report.status_code == 200
+    assert report.json()['benchmark']['status'] == 'available'
+    assert store.get(original['result_id']) == original
+    for kind in ('result', 'dataset', 'analysis'):
+        response = client.get(f"/api/results/{original['result_id']}/export", params={'format': kind})
+        assert response.status_code == 200
+        assert response.headers['content-disposition'].startswith('attachment; filename=')
+        assert response.headers['x-content-type-options'] == 'nosniff'
+        expected_key = 'result_id' if kind == 'result' else 'dataset_id' if kind == 'dataset' else 'analysis_id'
+        assert expected_key in response.json()
+    csv_result = client.get(f"/api/results/{original['result_id']}/export?format=decisions")
+    rows = list(csv.DictReader(io.StringIO(csv_result.text)))
+    assert len(rows) == len(original['selection_trace'])
+    assert rows[0]['result_id'] == original['result_id']
+    assert rows[0]['session'] == original['selection_trace'][0]['session']
+    assert client.get(f"/api/results/{original['result_id']}/export?format=anything").status_code == 422
+    assert client.get(f"/api/results/{original['result_id']}/analysis?benchmark_series_key=../x").status_code == 422

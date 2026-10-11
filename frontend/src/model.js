@@ -57,5 +57,10 @@ const reasons = {
   ex_post_daily_volume_execution_assumption: '일별 양수 거래량을 가정한 체결', stale_mark_carrying: '누락된 종가는 마지막 원본 종가로 평가',
   requested_basis_unavailable: '요청한 가격 기준 자료 없음', ambiguous_series_selection: '동일 기준의 자료가 여러 개',
   historical_adjustment_reference_unverified: '과거 조정 기준 시점 미검증', latest_source_revision_unavailable: '최신 자료 개정 사용 불가',
+  benchmark_not_selected: '비교 가격 자료를 직접 선택하세요', incomplete_benchmark_sessions: '가격 기준 자료 누락으로 전체 비교 불가',
+  stale_strategy_marks: '전략 평가가격 이월로 전체 비교 불가', no_closed_portions: '청산된 매입 부분 없음',
+  no_realized_losses: '실현 손실 없음 · 손익비 분모 없음',
+  no_downside_returns: '목표 0보다 낮은 수익률 없음', zero_drawdown: '낙폭 0 · 분모 없음',
+  exposure_unavailable: '투자 비중 자료 없음', insufficient_returns: '수익률 자료 부족',
 };
 export const reasonLabel = value => reasons[value] || exact(value);

@@ -15,6 +15,7 @@ from backtest_data.remote.postprocess import daily_publication_step
 from backtest_data.remote.sql import import_bundle
 from backtest_data.remote.worker import run_cycle
 from backtest_data.remote.folder import FolderTransport
+from backtest_data.remote.identity import validate_raw_identity_index
 
 
 def main():
@@ -27,6 +28,12 @@ def main():
     if not head_path.exists(): raise ValueError("private whole-target bootstrap artifact is required")
     head=json.loads(head_path.read_text());latest=safe_path(a.private_store,"bundles/"+head["bundle_id"])
     manifest=read_manifest(latest,expected_manifest_hash=head["manifest_hash"])
+    checkpoint=loads(json.dumps(manifest["checkpoint"]))
+    # A KRX account transfer must carry the original global content identities;
+    # identical empty or repeated response bytes must never mint new raw UUIDs.
+    if any(slot['source']=='krx' for slot in slots):
+        if 'raw_identity_index' not in checkpoint:raise ValueError('KRX original raw identity handoff index is required')
+        validate_raw_identity_index(checkpoint['raw_identity_index'])
     a.work.mkdir(parents=True,exist_ok=True);raw_root=a.work/"raw"
     engine=make_engine(os.environ["BACKTEST_DATABASE_URL"])
     try:
@@ -44,7 +51,7 @@ def main():
         from backtest_data.remote.source_handlers import run_owned_handlers
         result=run_cycle(engine,raw_root,ownership=ownership,planned_jobs=jobs,incoming_bundles=[],output_root=a.work/"outgoing",
                          transport_root=a.private_store,stream_id=stream,sequence=head["sequence"]+1,
-                         checkpoint=loads(json.dumps(manifest["checkpoint"])),budget_seconds=a.budget_seconds,
+                         checkpoint=checkpoint,budget_seconds=a.budget_seconds,
                          max_private_bytes=a.max_private_bytes,previous_bundle_id=head['bundle_id'],
                          postprocess=daily_publication_step,postprocess_budget_seconds=min(60,a.budget_seconds/5),
                          source_handlers=run_owned_handlers)
