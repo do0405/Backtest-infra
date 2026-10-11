@@ -9,7 +9,19 @@ $taskPython=(Resolve-Path -LiteralPath $PythonPath).Path
 $taskExisting=Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
 if ($taskExisting) {
     $taskProcess=Get-CimInstance Win32_Process -Filter ('ProcessId='+$taskExisting[0].OwningProcess)
-    if ($taskProcess.ExecutablePath -ne $taskPython -or $taskProcess.CommandLine -notmatch 'backtest_research.api') {
+    $taskCompatible=$taskProcess.ExecutablePath -eq $taskPython -and $taskProcess.CommandLine -match '\bbacktest_research\.api\b'
+    if (-not $taskCompatible -and $taskProcess.CommandLine -match '\bbacktest_research\.api\b') {
+        $taskLauncher=Get-CimInstance Win32_Process -Filter ('ProcessId='+$taskProcess.ParentProcessId)
+        $taskVenvRoot=Split-Path -Parent (Split-Path -Parent $taskPython)
+        $taskVenvConfig=Join-Path $taskVenvRoot 'pyvenv.cfg'
+        $taskBaseExecutable=$null
+        if (Test-Path -LiteralPath $taskVenvConfig) {
+            $taskHomeLine=Get-Content -LiteralPath $taskVenvConfig | Where-Object { $_ -match '^home\s*=' } | Select-Object -First 1
+            if ($taskHomeLine) { $taskBaseExecutable=Join-Path (($taskHomeLine -split '=',2)[1].Trim()) 'python.exe' }
+        }
+        $taskCompatible=$taskLauncher.ExecutablePath -eq $taskPython -and $taskLauncher.CommandLine -match '\bbacktest_research\.api\b' -and $taskProcess.ExecutablePath -eq $taskBaseExecutable
+    }
+    if (-not $taskCompatible) {
         throw 'Research port is occupied by another process; no process was stopped.'
     }
     Write-Output 'Existing research server: http://127.0.0.1:8765'

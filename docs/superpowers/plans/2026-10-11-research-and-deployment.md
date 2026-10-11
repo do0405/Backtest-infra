@@ -50,7 +50,7 @@ The user authorized implementation of the existing design, controlled checkpoint
 ## Task 6: public GitHub Actions and Secrets
 
 - [x] Prepare an explicit publication allowlist, scan current files and history for actual credential matches without printing values; exclude configs, raw authentication caches, local DB/storage and private operational artifacts.
-- [ ] Connect the chosen public repository and add reproducible CI/remote workflow plus deployment instructions. Use trusted dispatch/schedule and minimal permissions; do not expose Secrets to pull-request code.
+- [x] Connect the chosen public repository and add reproducible CI/remote workflow plus deployment instructions. Use trusted dispatch/schedule and minimal permissions; do not expose Secrets to pull-request code.
 - [x] Register provider secrets from existing local configs through protected stdin or encrypted GitHub API payloads; list only secret names/status. Interactive account authentication is performed by the user when required.
 - [x] Keep remote collection disabled until original identity handoff and nonoverlapping ownership are genuinely verified. Validate workflow execution independently from active all-source remote collection.
 - [x] Configure bounded artifact storage/retention and local download/import using original IDs, clocks, hashes and idempotent replay. Public result publication does not permit credential leakage.
@@ -72,3 +72,5 @@ Eligibility code/CLI and isolated PostgreSQL semantics passed 34 checks. Actual 
 Research API/framework/projection targeted validation passed 51 checks. The actual Samsung source sample contains 24 bars over 27 provisional weekday sessions, 27 selection traces and three framework fills. Browser restoration, date-specific evidence, real candles and same-input replay were verified. US live series lookup hit confirmed statement timeout and has no substitute fixture. Frontend independent spec and correctness/security reviews approved the restored-state fix.
 
 All eight provider Secrets were registered; remote ownership remains disabled. Public source publication and actual Actions result are recorded separately after final frontend build verification.
+
+Public snapshot 7616056ae258c4d702d220b2dcc66e841a7dde11 was pushed to do0405/Backtest-infra with no prior local Git history and no matched current credentials. GitHub manual run38111318058 passed88Python/SQL/framework checks,12frontend checks/build and all eight Secret presence booleans; no provider requests or remote source ownership change occurred. A later browser-only chart auto-size issue is separately fixed and must be reflected in the final frontend build/commit verification.

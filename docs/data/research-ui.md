@@ -72,13 +72,20 @@ the saved-result ID input and replayed against the same immutable input.
 
 ## Validation
 
-Twelve meaningful frontend tests cover exact numerical strings, chart admission of
+Sixteen meaningful frontend tests cover exact numerical strings, chart admission of
 nonfinite/malformed values and explicit date gaps, distinct trace stage filtering,
 full-window versus boundary input references, strict selection payloads and
 explicit feature mapping, API/network/fixture/empty-input failures, and restoring
 dataset B after screening dataset A without retaining A's ranking, and saved
-selection labels updating when security names resolve later. Snapshot
+selection labels updating when security names resolve later, and the chart size
+boundary through repeated resize feedback and selection changes, and data-table
+CSS padding/border isolation from chart-owned internal tables. Snapshot
 changes clear every derived view, including screening, features, publication
 metadata, active series and selected date. The
-production build uses the current v5 chart API (`addSeries` and
+Chart containers have independent fixed heights: 320 px for price/NAV and 180 px
+for drawdown. Auto-size observes responsive width within that boundary; padding
+and attribution remain outside the observed container. Application table
+selectors are scoped to `.table-wrap`, preserving the chart renderer's internal
+table sizing. The production build
+uses the current v5 chart API (`addSeries` and
 `createSeriesMarkers`). Chart attribution links to TradingView.

@@ -1,8 +1,8 @@
 {
-  "build_time_utc": "2026-10-11T04:19:56.3344255Z",
+  "build_time_utc": "2026-10-11T04:29:12.7198989Z",
   "node": "24.15.0",
   "npm": "11.12.1",
-  "tests": "12 passed, 5 files",
+  "tests": "16 passed, 7 files",
   "build": "vite 8.3.4 success",
   "source_copy_verified": true,
   "files": [
@@ -24,11 +24,11 @@
     },
     {
       "path": "src/styles.css",
-      "sha256": "f810ecd9e5ba6842fa4d038abf55a06aa7217c78e03543bd08a9eff2de153a97"
+      "sha256": "2e36c1c053d6b4ec6d97eff6e7f6c035c2d65e21440c6ec77b1a656ab35b5abe"
     },
     {
       "path": "src/components/Charts.jsx",
-      "sha256": "8b4ddead19ce0b6716d235edddd07d9460419f00862590a712c561be8c756d39"
+      "sha256": "4c607e049862b1bf3e41b8929fa75f6dc94fa94dff7011058c3eb656dd82eb93"
     },
     {
       "path": "src/components/SecurityPicker.jsx",
@@ -51,6 +51,10 @@
       "sha256": "83c1bbcc24af5472e26eecbaca4742792c89a57abbdff92f12572009b683dd16"
     },
     {
+      "path": "tests/Charts.size.test.jsx",
+      "sha256": "49d7ef795ac162570aa6d59698104d47a63ac766d494b574449bf4d492ef44fb"
+    },
+    {
       "path": "tests/model.test.js",
       "sha256": "06c881583f243d8c4593a84e12a8ef372cea85ff3fc181a9886441117854822c"
     },
@@ -59,20 +63,24 @@
       "sha256": "b91049a6708dda6f23bb96ac331a7b7babb87ffbd234265b3340069ecd3de5d9"
     },
     {
+      "path": "tests/styles.tables.test.js",
+      "sha256": "0117886e9c24905051586d0fd40f085ea68306318a9f4ca7e9a7141973ac7b57"
+    },
+    {
       "path": "tests/TraceExplorer.test.jsx",
       "sha256": "fe88c9581b7a8230e45fa56e8d4ff9036fcf98d5964cbeb6ed116be544b6259e"
     },
     {
       "path": "dist/index.html",
-      "sha256": "e29b011589970ce8935c3c587b0e90dec811433f6104faa1aabd39120ebf12d5"
+      "sha256": "fe745edbc24f11450d0812a7f415b3c7e2ef08c585822d7f349ac0b65f66ce32"
     },
     {
-      "path": "dist/assets/index-BLpjHUH-.css",
-      "sha256": "d7d2b42f3ee15ea6fe4cad8dde354032e8bfb66b3c3dfbdcc1799af336f60370"
+      "path": "dist/assets/index-Bu_dQE_a.css",
+      "sha256": "84419407fc3c9a54507465c31ec1a28eb24d374896f428564287d754a822049c"
     },
     {
-      "path": "dist/assets/index-uXDOz3qs.js",
-      "sha256": "81c1e81dffca4e135b1220287cd08fcf9bfb42a1faacf64acc9da6add99973ae"
+      "path": "dist/assets/index-DCp3Zndm.js",
+      "sha256": "bffb093a419b79abfa5093156c68df264016bcdde8e95d8f110e433f49e2c538"
     },
     {
       "path": "package.json",

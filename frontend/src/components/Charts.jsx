@@ -5,6 +5,7 @@ import { Empty } from './Shared.jsx';
 
 const emptyData = [];
 export function ResearchChart({ kind = 'price', bars = emptyData, sessions = emptyData, rows = emptyData, features, selectedSession, onSessionChange }) {
+  const chartHeight = kind === 'drawdown' ? 180 : 320;
   const container = useRef(null);
   const chartState = useRef(null);
   const callback = useRef(onSessionChange);
@@ -14,7 +15,7 @@ export function ResearchChart({ kind = 'price', bars = emptyData, sessions = emp
     if (!container.current || (kind === 'price' ? !bars.length : !rows.length)) return;
     setError('');
     const chart = createChart(container.current, {
-      height: kind === 'drawdown' ? 180 : 320,
+      height: chartHeight,
       autoSize: true,
       layout: { background: { type: ColorType.Solid, color: '#ffffff' }, textColor: '#687684', fontFamily: 'system-ui, sans-serif', attributionLogo: true },
       grid: { vertLines: { color: '#f0f3f4' }, horzLines: { color: '#edf1f2' } },
@@ -57,5 +58,7 @@ export function ResearchChart({ kind = 'price', bars = emptyData, sessions = emp
   }, [selectedSession, kind, bars, rows, features]);
   const hasData = kind === 'price' ? bars.length > 0 : rows.length > 0;
   if (!hasData) return <Empty title={kind === 'price' ? '가격을 살펴볼 준비' : '전략의 흐름을 확인하세요'}>자료를 로드하고 연구를 실행하면 실제 가격과 자산 가치가 표시됩니다.</Empty>;
-  return <div className="chart-block">{error && <p role="alert" className="error-box">{error}</p>}<div ref={container} className="chart" role="img" aria-label={kind === 'price' ? '실제 가격 캔들 및 이동평균 차트. 날짜 선택은 아래 판단일 메뉴로도 가능합니다.' : kind === 'drawdown' ? '날짜별 자산 낙폭 차트' : '날짜별 자산 가치 차트'} /><div className="chart-credit">Charting by <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">TradingView</a> · Lightweight Charts™</div></div>;
+  // Auto-size must observe an independent height boundary rather than infer
+  // parent height from the renderer's own child, which creates resize feedback.
+  return <div className="chart-block">{error && <p role="alert" className="error-box">{error}</p>}<div ref={container} className="chart" style={{ height: chartHeight, minHeight: chartHeight, maxHeight: chartHeight, padding: 0, overflow: 'hidden' }} role="img" aria-label={kind === 'price' ? '실제 가격 캔들 및 이동평균 차트. 날짜 선택은 아래 판단일 메뉴로도 가능합니다.' : kind === 'drawdown' ? '날짜별 자산 낙폭 차트' : '날짜별 자산 가치 차트'} /><div className="chart-credit">Charting by <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">TradingView</a> · Lightweight Charts™</div></div>;
 }
