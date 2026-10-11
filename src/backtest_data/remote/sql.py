@@ -200,7 +200,7 @@ def import_bundle(session, bundle, *, imported_at=None, expected_manifest_hash=N
         existing={};references={};dependencies={}
         for name in {key[0] for key in pending}:
             table=registry[name];primary=list(table.primary_key.columns)[0]
-            for value in _original_rows(session,table,primary,[key[1] for key in pending if key[0]==name]):
+            for value in _original_rows(session,table,primary,[key[1] for key in pending if key[0]==name],batch_size=100):
                 existing[(name,value[primary.name])]=value
         for key,row in pending.items():
             table=registry[row['table']];deps=set()
@@ -219,8 +219,8 @@ def import_bundle(session, bundle, *, imported_at=None, expected_manifest_hash=N
         available=set()
         for (name,column),values in references.items():
             target=registry[name].c[column];values=list(values)
-            for offset in range(0,len(values),1000):
-                available.update((name,column,value) for value in session.scalars(select(target).where(target.in_(values[offset:offset+1000]))))
+            for offset in range(0,len(values),100):
+                available.update((name,column,value) for value in session.scalars(select(target).where(target.in_(values[offset:offset+100]))))
         while pending:
             ready=[key for key in pending if dependencies[key]<=available]
             if not ready: raise ValueError("source parent missing or cyclic closure")

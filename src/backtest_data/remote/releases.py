@@ -8,6 +8,7 @@ import subprocess
 import zipfile
 from datetime import datetime
 from uuid import UUID
+from sqlalchemy import text
 from .registry import ALLOWED_TABLES
 
 from .bundle import digest, read_manifest, iter_bundle_rows
@@ -163,7 +164,10 @@ def import_release(engine,store,commit,raw_root):
         raise ValueError('final checkpoint hash mismatch')
     for _,path in groups:
         # Each transaction preserves original values and writes its receipt.
-        with transaction(engine) as session:results.append(import_bundle(session,path,raw_root=raw_root))
+        with transaction(engine) as session:
+            session.execute(text("SET LOCAL application_name='backtest_release_sync'"))
+            session.execute(text("SET LOCAL statement_timeout='120s'"))
+            results.append(import_bundle(session,path,raw_root=raw_root))
     return {'checked_at':utcnow().isoformat(),'status':'local_sql_synced','stream_id':commit['stream_id'],
         'end_sequence':commit['end_sequence'],'bundles':len(results),
         'inserted_rows':sum(value['inserted_rows'] for value in results),'results':results,'coverage_complete':False}

@@ -21,7 +21,15 @@ def test_large_shared_parent_group_preserves_values_and_rolls_back_natural_key_c
  rows=[wire_row({'table':'issuer','values':{c.name:getattr(v,c.name) for c in Issuer.__table__.c}}) for v in values]
  scope={'target_count':17758,'output_start':'2016-01-01','output_end':'2026-10-07'}
  bundle=write_bundle(tmp_path/'ok',rows,stream_id='bulk-'+uuid.uuid4().hex,sequence=1,scope=scope,created_at=now)
- assert import_bundle(db_session,bundle)['inserted_rows']==0
+ from sqlalchemy import event
+ lookup_sizes=[]
+ def measure(connection,cursor,statement,parameters,context,executemany):
+  if statement.startswith('SELECT') and 'FROM issuer' in statement and ' IN (' in statement:
+   lookup_sizes.append(len(parameters))
+ event.listen(db_session.bind,'before_cursor_execute',measure)
+ try:assert import_bundle(db_session,bundle)['inserted_rows']==0
+ finally:event.remove(db_session.bind,'before_cursor_execute',measure)
+ assert lookup_sizes and max(lookup_sizes)<=100
  fresh=[{'table':'issuer','values':{**rows[0]['values'],'id':str(uuid.uuid4()),'source_identifier':uuid.uuid4().hex,'name':'New original '+str(i)}} for i in range(205)]
  new=write_bundle(tmp_path/'new',fresh,stream_id='new-bulk-'+uuid.uuid4().hex,sequence=1,scope=scope,created_at=now)
  assert import_bundle(db_session,new)['inserted_rows']==205

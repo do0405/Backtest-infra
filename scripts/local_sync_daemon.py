@@ -58,9 +58,15 @@ def sync_once(engine,gh,configuration,root,state):
         commit=read_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'],tag=tag)
         if commit['start_sequence']!=state.get('end_sequence',0)+1 or commit['previous_tag']!=state.get('last_tag') or commit['previous_commit_sha256']!=state.get('last_commit_sha256'):
             raise ValueError('remote_checkpoint_lineage_requires_review')
+        state.update(checked_at=utcnow().isoformat(),status='downloading_committed_release',
+            in_flight_release={'tag':tag,'cloud_run_id':commit['cloud_run_id'],'download_directory':str(run)},requires_user=False)
+        for field in ('error_type','sqlstate'):state.pop(field,None)
+        atomic_json(Path(root)/'progress.json',state)
         archive=download_asset(gh,repo,release,'delta.zip',run)
         verify_file(archive,commit['files']['delta.zip'])
         store=run/'store';restore(archive,store,MAX_ASSET)
+        state.update(checked_at=utcnow().isoformat(),status='importing_committed_release')
+        atomic_json(Path(root)/'progress.json',state)
         result=import_release(engine,store,commit,Settings.from_env().raw_root)
         # A receipt on disk is recorded after all SQL transactions commit. If
         # this replace is interrupted, replay inserts zero rather than guessing.
@@ -71,6 +77,7 @@ def sync_once(engine,gh,configuration,root,state):
         state.update(completed_releases=completed,end_sequence=commit['end_sequence'],last_tag=tag,
             last_commit_sha256=digest(commit_path),last_commit_at=utcnow().isoformat(),
             source_status=commit['source_status'],inserted_rows=state.get('inserted_rows',0)+result['inserted_rows'])
+        state.pop('in_flight_release',None)
         atomic_json(Path(root)/'progress.json',state)
     actionable=any(v['requires_user'] for v in state.get('source_status',[]))
     for field in ('error_type','sqlstate'):

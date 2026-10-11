@@ -70,6 +70,13 @@ value, natural-key collision, missing parent or stream collision rolls back the
 whole bundle savepoint. Immutable receipts and stream cursors commit with source
 rows. Replaying an imported bundle adds zero rows.
 
+Existing-ID and external-parent reads during local import also use at most 100
+identities per query. Each import transaction identifies itself as
+`backtest_release_sync` and limits individual statements to 120 seconds. A
+verified statement timeout rolls back that bundle and retries from receipts;
+it does not impose an overall synchronization budget or reset source jobs.
+Download and import phases are recorded separately before the final SQL receipt.
+
 ## Continuous local synchronization
 
 `scripts/local_sync_daemon.py` polls published Releases, verifies predecessor and
