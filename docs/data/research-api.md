@@ -53,3 +53,11 @@ The strategy retains its modeled fees/slippage. Basis/adjustments/source remain
 visible. Missing benchmark dates are null without carrying/compression; the
 aggregate relative return is unavailable when any benchmark session is missing
 or the strategy carries stale marks. Same market/currency is required.
+
+`missing_sessions` lists only absent source observations. If the first declared
+session has no price, `normalization_reason=benchmark_initial_anchor_missing`
+and `normalization_unavailable_sessions` cover the entire normalized path;
+later actual close values/references remain present and are not called missing.
+Annualization overflow and other nonfinite derived report values are individually
+null with `numeric_range_unavailable`, retaining finite total returns and source
+prices. This report-only numeric guard leaves the engine evaluator unchanged.

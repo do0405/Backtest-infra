@@ -29,3 +29,16 @@ result_id. Its price benchmark keeps the three missing provisional calendar
 dates and returns an unavailable aggregate comparison. This is actual saved
 source evidence, not a fixture substituted for SQL failures. Live server restart
 and browser publication verification remain the parent's operational scope.
+
+Independent review then reproduced and fixed two counterexamples in report-only
+code: finite price data whose annualized CAGR overflows, and a missing initial
+benchmark anchor falsely listing all later observed dates as price gaps. The
+new numeric policy preserves finite ordinary returns and emits explicit null
+reasons for unrepresentable derived metrics, without changing engine evaluation.
+Actual absent observations and normalization-unavailable sessions are separate;
+the UI explains their difference. Additional API/handcase/UI regressions were
+added and the complete frontend now passes 21 tests in nine files.
+The final report/API/actual-framework subset passed 33 checks. A separate
+nonfinite-float/Calmar counterexample is covered, in addition to HTTP200 for the
+valid high-growth benchmark and the initial-anchor distinction. The actual saved
+Samsung result again produced HTTP200 and the same original Backtrader replay ID.

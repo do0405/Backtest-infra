@@ -194,33 +194,49 @@ def import_bundle(session, bundle, *, imported_at=None, expected_manifest_hash=N
             table = validate_row(row); key = (row["table"], _pk(table, row["values"]))
             if key in pending and dumps(pending[key]) != dumps(row): raise ValueError("duplicate source ID with different content")
             pending[key] = row
+        # Verify existing originals and parent availability in bounded groups.
+        # A common catalog/raw parent is read once, rather than for every quote.
+        existing={};references={};dependencies={}
+        for name in {key[0] for key in pending}:
+            table=registry[name];primary=list(table.primary_key.columns)[0]
+            for value in _original_rows(session,table,primary,[key[1] for key in pending if key[0]==name]):
+                existing[(name,value[primary.name])]=value
+        for key,row in pending.items():
+            table=registry[row['table']];deps=set()
+            for fk in table.foreign_keys:
+                target=row['values'][fk.parent.name]
+                if target is None:continue
+                name,column=fk.column.table.name,fk.column.name
+                if name not in registry:raise ValueError('parent outside source allowlist')
+                deps.add((name,column,target))
+            for name,identity in logical_parents(row):
+                deps.add((name,list(registry[name].primary_key.columns)[0].name,identity))
+            dependencies[key]=deps
+            for name,column,target in deps:references.setdefault((name,column),set()).add(target)
+            if key in existing and dumps(wire_row({'table':key[0],'values':existing[key]})['values'])!=dumps(row['values']):
+                raise ValueError('immutable original row collision')
+        available=set()
+        for (name,column),values in references.items():
+            target=registry[name].c[column];values=list(values)
+            for offset in range(0,len(values),1000):
+                available.update((name,column,value) for value in session.scalars(select(target).where(target.in_(values[offset:offset+1000]))))
         while pending:
-            ready = []
-            for key, row in pending.items():
-                table = registry[row["table"]]; values = row["values"]; parents_ready = True
-                for fk in table.foreign_keys:
-                    target = values[fk.parent.name]
-                    if target is None: continue
-                    if fk.column.table.name not in registry: raise ValueError("parent outside source allowlist")
-                    parent_exists = session.execute(select(fk.column).where(fk.column == target)).first()
-                    if parent_exists is None: parents_ready = False; break
-                if parents_ready:
-                    for parent_name,parent_id in logical_parents(row):
-                        parent_table=registry[parent_name];primary=list(parent_table.primary_key.columns)[0]
-                        if session.execute(select(primary).where(primary==parent_id)).first() is None:
-                            parents_ready=False;break
-                if parents_ready: ready.append(key)
+            ready=[key for key in pending if dependencies[key]<=available]
             if not ready: raise ValueError("source parent missing or cyclic closure")
+            by_table={}
             for key in ready:
-                row = pending.pop(key); table = registry[row["table"]]; values = row["values"]
-                primary = list(table.primary_key.columns)[0]
-                existing = _original_row(session,table,primary == values[primary.name])
-                if existing is not None:
-                    if dumps(wire_row({'table':row['table'],'values':dict(existing)})['values']) != dumps(values): raise ValueError("immutable original row collision")
-                    continue
-                inserted_id = session.execute(insert(table).values(**database_values(row)).on_conflict_do_nothing().returning(primary)).scalar_one_or_none()
-                if inserted_id is None: raise ValueError("source stable ID conflicts with existing natural key")
-                inserted += 1
+                if key not in existing:by_table.setdefault(key[0],[]).append(pending[key])
+            for name,rows in by_table.items():
+                table=registry[name];primary=list(table.primary_key.columns)[0]
+                for offset in range(0,len(rows),100):
+                    batch=rows[offset:offset+100]
+                    identities=list(session.scalars(insert(table).values([database_values(row) for row in batch]).on_conflict_do_nothing().returning(primary)))
+                    if len(identities)!=len(batch):raise ValueError('source stable ID conflicts with existing natural key')
+                    inserted+=len(identities)
+            for key in ready:
+                row=pending.pop(key)
+                for (name,column) in references:
+                    if name==key[0]:available.add((name,column,row['values'][column]))
         session.add(RemoteImportReceipt(bundle_id=manifest["bundle_id"], stream_id=manifest["stream_id"], sequence=manifest["sequence"],
             manifest_hash=manifest_hash, imported_at=imported_at, inserted_rows=inserted,
             scope=manifest["scope"], checkpoint=manifest["checkpoint"]))

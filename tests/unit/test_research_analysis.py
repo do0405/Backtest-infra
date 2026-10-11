@@ -126,3 +126,45 @@ def test_risk_summary_hand_values_zero_target_sortino_calmar_exposure_and_underw
     assert flat['sortino']['reason'] == 'no_downside_returns'
     assert flat['calmar']['reason'] == 'zero_drawdown'
     assert flat['mean_exposure']['reason'] == 'exposure_unavailable'
+
+
+def test_valid_large_two_session_benchmark_keeps_return_but_bounds_cagr_overflow():
+    data = dataset([10, 1000])
+    saved = result(data)
+    report = build_analysis(saved, data, benchmark_series_key=data.series[0].key)
+    assert report['benchmark']['status'] == 'available'
+    assert report['benchmark']['metrics']['total_return']['value'] == 99
+    assert report['benchmark']['metrics']['cagr'] == {'value': None, 'reason': 'numeric_range_unavailable'}
+    assert report['comparison']['total_return_difference']['value'] == -99
+    import json
+    json.dumps(report, allow_nan=False)
+
+
+def test_missing_first_anchor_distinguishes_observation_gaps_from_normalization_failure():
+    data = dataset([10, 11, 12], missing=(0,))
+    report = build_analysis(result(data), data, benchmark_series_key=data.series[0].key)
+    benchmark = report['benchmark']
+    assert benchmark['missing_sessions'] == ['2020-01-02']
+    assert benchmark['normalization_unavailable_sessions'] == ['2020-01-02', '2020-01-03', '2020-01-06']
+    assert benchmark['normalization_reason'] == 'benchmark_initial_anchor_missing'
+    assert benchmark['status'] == 'unavailable'
+    assert benchmark['rows'][1]['close'] == '11'
+    assert benchmark['rows'][1]['observation_id'] == '1'
+    assert all(row['nav'] is None for row in benchmark['rows'])
+    assert report['comparison']['total_return_difference']['reason'] == 'benchmark_initial_anchor_missing'
+
+
+def test_report_only_risk_and_nonfinite_float_conversion_have_explicit_range_reasons():
+    import json
+    from backtest_research.evaluation.reporting import _report_metrics
+    risk = analyze_risk([{'session': '2020-01-01', 'nav': '100'},
+                         {'session': '2020-01-02', 'nav': '1000000000'},
+                         {'session': '2020-01-03', 'nav': '100000000'}])
+    assert risk['calmar'] == {'value': None, 'reason': 'numeric_range_unavailable'}
+    metrics = _report_metrics([{'session': '2020-01-01', 'nav': '1e-300'},
+                               {'session': '2020-01-02', 'nav': '1e300'}])
+    assert metrics['total_return'] == {'value': None, 'reason': 'numeric_range_unavailable'}
+    assert metrics['cagr'] == {'value': None, 'reason': 'numeric_range_unavailable'}
+    assert metrics['annualized_volatility']['reason'] == 'numeric_range_unavailable'
+    assert metrics['max_drawdown']['value'] == 0
+    json.dumps({'risk': risk, 'metrics': metrics}, allow_nan=False)

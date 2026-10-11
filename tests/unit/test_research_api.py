@@ -118,3 +118,21 @@ def test_read_only_derived_analysis_and_downloads_preserve_saved_result(tmp_path
     assert rows[0]['session'] == original['selection_trace'][0]['session']
     assert client.get(f"/api/results/{original['result_id']}/export?format=anything").status_code == 422
     assert client.get(f"/api/results/{original['result_id']}/analysis?benchmark_series_key=../x").status_code == 422
+
+
+def test_valid_large_price_benchmark_analysis_and_json_export_do_not_raise_500(tmp_path):
+    from tests.oracles.research_ledger import dataset
+    from backtest_research.engines import run_backtest
+    from backtest_research.results import ImmutableResultStore
+    client = TestClient(create_app(projector=Projector(), directory=tmp_path))
+    data = dataset([10, 1000])
+    DatasetStore(tmp_path/'datasets').put(data)
+    saved = run_backtest(data, raw_series_keys=[data.series[0].key], initial_cash='100',
+                         parameters={'fast_period': 1, 'slow_period': 2})
+    ImmutableResultStore(tmp_path/'results').put(saved)
+    params = {'benchmark_series_key': data.series[0].key}
+    for endpoint in ('analysis', 'export'):
+        response = client.get(f"/api/results/{saved['result_id']}/{endpoint}", params=params | ({'format': 'analysis'} if endpoint == 'export' else {}))
+        assert response.status_code == 200
+        assert response.json()['benchmark']['metrics']['total_return']['value'] == 99
+        assert response.json()['benchmark']['metrics']['cagr']['value'] is None

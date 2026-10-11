@@ -213,3 +213,11 @@ cash/share processing; FX and asynchronous market valuation; financial-factor
 step functions; registry-backed OOS/walk-forward trial/holdout history; verified
 historical index/member weights and lifecycle. Nothing in this report certifies
 those missing capabilities from partial price data.
+
+Independent review counterexamples are regression-tested: a valid two-session
+100-fold price increase has a finite ordinary return but unrepresentable CAGR.
+Report-only derived metrics now bound overflow/nonfinite results independently
+to null plus `numeric_range_unavailable`; original prices and representable
+returns remain available. The framework evaluator file remains unchanged.
+Missing first benchmark anchors are separated from actual price gaps: present
+later observations retain their prices/IDs while normalization stays unavailable.

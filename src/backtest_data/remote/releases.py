@@ -90,6 +90,7 @@ def read_commit(path, *, stream, bootstrap_hash, tag=None):
         elif str(UUID(value['previous_bundle_id']))!=value['previous_bundle_id'] or not re.fullmatch(re.escape(release_tag(stream,value['start_sequence']-1))+r'(?:-r\d+-a\d+)?',value['previous_tag']) or not re.fullmatch('[a-f0-9]{64}',value['previous_commit_sha256']):
             raise ValueError('invalid predecessor')
         if not isinstance(value['counts'],dict) or any(k not in ALLOWED_TABLES or type(v)is not int or not 0<=v<=10**9 for k,v in value['counts'].items()):raise ValueError('invalid counts')
+        if not isinstance(value['source_status'],list) or len(value['source_status'])>1:raise ValueError('bounded KRX outcome list required')
         for outcome in value['source_status']:
             if set(outcome)!={'handler','status','reason','requires_user'} or outcome['handler']!='krx_quotes' or type(outcome['requires_user'])is not bool or not re.fullmatch('[a-z_]{1,60}',outcome['status']) or outcome['reason'] not in {'authentication_required','temporary_provider_wait','unclassified_source_failure',None}:raise ValueError('invalid outcome')
     except (TypeError,KeyError,AttributeError,ValueError) as exc:
@@ -111,8 +112,8 @@ def source_status(outcomes):
         blocked=outcome.get('collection',outcome).get('blocked_sources',{})
         codes={str(code).lower() for code in blocked.values()}
         auth=bool(codes & {'401','403','requires_credentials','authentication_error','access_denied'})
-        temporary=bool(codes) and all(code in {'429','500','502','503','504','020','800','900','rate_limit'} for code in codes)
-        failed=status=='source_error' or bool(codes) and not temporary
+        temporary=outcome.get('retryable') is True or bool(codes) and all(code in {'429','500','502','503','504','020','800','900','rate_limit','lease_lost','network_error','transport_failed','rate_budget_deferred','retry_deferred','shared_call_budget_deferred'} or re.fullmatch(r'http_(?:429|5\d\d)',code) for code in codes)
+        failed=(status=='source_error' or bool(codes)) and not temporary
         reason='authentication_required' if auth else 'temporary_provider_wait' if temporary else 'unclassified_source_failure' if failed else None
         result.append({'handler':outcome['handler'],'status':status,'reason':reason,'requires_user':auth or failed})
     return result

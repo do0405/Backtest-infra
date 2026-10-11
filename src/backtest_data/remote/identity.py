@@ -67,15 +67,19 @@ def validate_raw_identity_index(index, *, max_rows=MAX_RAW_IDENTITY_ROWS, max_by
 
 
 def snapshot_raw_identities(session, *, max_rows=MAX_RAW_IDENTITY_ROWS, max_bytes=MAX_RAW_IDENTITY_BYTES):
-    """Stream every current raw metadata row once, ordered by original UUID."""
+    """Read each metadata row once and canonicalize UUID order in memory.
+
+    UUID index order scatters reads across the live external-disk heap. SQL
+    order is unnecessary for this bounded snapshot; final wire order is stable.
+    """
     _bounds(max_rows, max_bytes)
     rows = []
-    statement = select(*RawObject.__table__.c).order_by(RawObject.id).limit(max_rows + 1).execution_options(yield_per=_BATCH_SIZE)
+    statement = select(*RawObject.__table__.c).limit(max_rows + 1).execution_options(yield_per=_BATCH_SIZE)
     for row in session.execute(statement).mappings().yield_per(_BATCH_SIZE):
         if len(rows) >= max_rows:
             raise ValueError("raw identity row bound exceeded")
         rows.append(dict(row))
-    return validate_raw_identity_index({"version": 1, "rows": rows}, max_rows=max_rows, max_bytes=max_bytes)
+    return validate_raw_identity_index({"version": 1, "rows": sorted(rows,key=lambda row:row['id'])}, max_rows=max_rows, max_bytes=max_bytes)
 
 
 def restore_raw_identities(session, index, *, authority, max_rows=MAX_RAW_IDENTITY_ROWS, max_bytes=MAX_RAW_IDENTITY_BYTES):

@@ -62,5 +62,7 @@ const reasons = {
   no_realized_losses: '실현 손실 없음 · 손익비 분모 없음',
   no_downside_returns: '목표 0보다 낮은 수익률 없음', zero_drawdown: '낙폭 0 · 분모 없음',
   exposure_unavailable: '투자 비중 자료 없음', insufficient_returns: '수익률 자료 부족',
+  benchmark_initial_anchor_missing: '첫 비교 기준일 가격 없음 · 전체 환산 불가',
+  numeric_range_unavailable: '지원 수치 범위를 넘어 계산 불가',
 };
 export const reasonLabel = value => reasons[value] || exact(value);

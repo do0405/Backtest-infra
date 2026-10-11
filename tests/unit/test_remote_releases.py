@@ -37,6 +37,8 @@ def test_provider_authentication_is_actionable_but_quota_is_not():
     assert r.source_status([{'handler':'krx_quotes','status':'blocked','blocked_sources':{'krx':'401'}}])[0]['requires_user']
     assert not r.source_status([{'handler':'krx_quotes','status':'blocked','blocked_sources':{'krx':'429'}}])[0]['requires_user']
     assert r.source_status([{'handler':'krx_quotes','status':'source_error','reason':'ProgrammingError'}])[0]['requires_user']
+    assert not r.source_status([{'handler':'krx_quotes','status':'partial','collection':{'blocked_sources':{'krx':'lease_lost'}}}])[0]['requires_user']
+    assert not r.source_status([{'handler':'krx_quotes','status':'source_error','reason':'OperationalError','retryable':True}])[0]['requires_user']
 
 
 def test_inventory_excludes_unpublished_drafts_and_unrelated_releases():

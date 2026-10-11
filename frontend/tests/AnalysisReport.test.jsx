@@ -47,3 +47,19 @@ test('changing result clears stale analysis and rejects a report bound to anothe
   await screen.findByRole('alert');
   expect(screen.getByRole('link', { name: '결과 JSON' }).getAttribute('href')).toContain(other);
 });
+
+test('missing initial anchor explains normalization separately from actual absent prices', async () => {
+  const body = report(id);
+  body.benchmark = { status: 'unavailable', reason: 'benchmark_initial_anchor_missing',
+    normalization_reason: 'benchmark_initial_anchor_missing', missing_sessions: ['2020-01-02'],
+    normalization_unavailable_sessions: ['2020-01-02', '2020-01-03', '2020-01-06'],
+    rows: [{ session: '2020-01-02', nav: null }, { session: '2020-01-03', close: '11', nav: null }], series_identity: selections[0] };
+  body.comparison.total_return_difference = { value: null, reason: 'benchmark_initial_anchor_missing' };
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => body })));
+  render(<AnalysisReport result={result} selections={selections} />);
+  await screen.findByText(/첫 비교 기준일 가격이 없어/);
+  const actualMissing = screen.getByText(/^가격 기준 자료 누락:/).textContent;
+  expect(actualMissing).toContain('2020-01-02');
+  expect(actualMissing).not.toContain('2020-01-03');
+  expect(screen.getByText(/이후 날짜의 실제 가격 누락을 뜻하지 않습니다/)).toBeTruthy();
+});

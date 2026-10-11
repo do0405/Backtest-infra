@@ -82,7 +82,7 @@ the saved-result ID input and replayed against the same immutable input.
 
 ## Validation
 
-Twenty meaningful frontend tests cover exact numerical strings, chart admission of
+Twenty-one meaningful frontend tests cover exact numerical strings, chart admission of
 nonfinite/malformed values and explicit date gaps, distinct trace stage filtering,
 full-window versus boundary input references, strict selection payloads and
 explicit feature mapping, API/network/fixture/empty-input failures, and restoring
@@ -100,8 +100,12 @@ table sizing. The production build
 uses the current v5 chart API (`addSeries` and
 `createSeriesMarkers`). Chart attribution links to TradingView.
 
-The four report/benchmark follow-up checks cover explicit benchmark selection,
+The five report/benchmark follow-up checks cover explicit benchmark selection,
 source/cost distinctions, immutable download links, result identity validation
 and stale report clearing, and NAV comparison lines preserving null sessions
 without affecting ordinary price candles. Report loading errors leave the
 original saved result, ledger and trace accessible.
+
+An absent first benchmark price gets a separate explanation: later observed
+prices still exist, but the entire path cannot be normalized to that first
+date. The price-gap list displays only the genuinely absent observations.

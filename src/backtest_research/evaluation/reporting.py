@@ -1,7 +1,7 @@
 """Read-only, reproducible post-run reports from exact saved inputs."""
 from collections import deque
 from datetime import date
-from decimal import Context, Decimal, localcontext
+from decimal import Context, Decimal, DecimalException, localcontext
 import csv
 import hashlib
 import io
@@ -9,10 +9,10 @@ import json
 import math
 from pathlib import Path
 import re
+from statistics import mean, stdev
 
 from backtest_research.contracts import canonical_hash
 from backtest_research.results import verify_result
-from . import calculate_metrics
 
 REPORT_POLICY = 'research_post_run_analysis_v1'
 
@@ -25,7 +25,58 @@ def _decimal(value):
 
 
 def _metric(value=None, reason=None):
+    if isinstance(value, float) and not math.isfinite(value):
+        return dict(value=None, reason='numeric_range_unavailable')
     return dict(value=value, reason=reason)
+
+
+def _bounded_metric(calculation):
+    try:
+        value = calculation()
+        return _metric(float(value) if isinstance(value, Decimal) else value)
+    except (OverflowError, ZeroDivisionError, DecimalException):
+        return _metric(reason='numeric_range_unavailable')
+
+
+def _report_metrics(nav_rows):
+    """Report-only finite metrics; never changes the framework evaluator hash.
+
+    Guard each derived float independently so an unavailable annualized metric
+    does not discard a valid ordinary return, drawdown or the source NAV rows.
+    """
+    rows = list(nav_rows)
+    names = ('total_return', 'cagr', 'max_drawdown', 'annualized_volatility', 'sharpe', 'turnover')
+    result = dict(evaluation_scope='in_sample_research', numeric_policy='bounded_descriptive_metrics_v1',
+                  annualization_sessions=252, risk_free_rate=0,
+                  costs=dict(fees='0', slippage='0', tax='0'), trade_win_rate=_metric(reason='no_closed_lots'))
+    if not rows:
+        result.update({name: _metric(reason='empty_nav') for name in names})
+        return result
+    values = [_decimal(row['nav']) for row in rows]
+    if any(value <= 0 for value in values):
+        result.update({name: _metric(reason='nonpositive_nav') for name in names})
+        return result
+    dates = [date.fromisoformat(row['session']) for row in rows]
+    if dates != sorted(set(dates)):
+        raise ValueError('ordered unique NAV sessions required')
+    result['total_return'] = _bounded_metric(lambda: values[-1] / values[0] - 1)
+    elapsed = (dates[-1] - dates[0]).days
+    result['cagr'] = _bounded_metric(lambda: float(values[-1] / values[0]) ** (365.2425 / elapsed) - 1) if elapsed else _metric(reason='zero_elapsed_days')
+    peak, drawdown = values[0], Decimal(0)
+    for value in values:
+        peak = max(peak, value)
+        drawdown = min(drawdown, value / peak - 1)
+    result['max_drawdown'] = _bounded_metric(lambda: drawdown)
+    return_metrics = [_bounded_metric(lambda a=a, b=b: b / a - 1) for a, b in zip(values, values[1:])]
+    if any(row['value'] is None for row in return_metrics):
+        result['annualized_volatility'] = result['sharpe'] = _metric(reason='numeric_range_unavailable')
+    else:
+        returns = [row['value'] for row in return_metrics]
+        std = _bounded_metric(lambda: stdev(returns)) if len(returns) > 1 else _metric(0)
+        result['annualized_volatility'] = _bounded_metric(lambda: std['value'] * math.sqrt(252)) if std['value'] is not None and returns else _metric(reason=std['reason'] or 'insufficient_returns')
+        result['sharpe'] = _bounded_metric(lambda: mean(returns) / std['value'] * math.sqrt(252)) if std['value'] else _metric(reason=std['reason'] or ('zero_return_variance' if returns else 'insufficient_returns'))
+    result['turnover'] = _metric(0.0)
+    return result
 
 
 def analyze_trades(ledger):
@@ -103,7 +154,7 @@ def analyze_trades(ledger):
                        breakeven_portions=sum(value == 0 for value in outcomes), open_quantity=sum(row['quantity'] for row in open_lots),
                        realized_gains=str(gains), realized_losses=str(losses), realized_net_pnl=str(sum(outcomes, Decimal(0))),
                        win_rate=_metric(sum(value > 0 for value in outcomes) / len(outcomes)) if outcomes else _metric(reason='no_closed_portions'),
-                       profit_factor=_metric(float(gains / losses)) if losses else _metric(reason='no_realized_losses' if outcomes else 'no_closed_portions'),
+                       profit_factor=_bounded_metric(lambda: gains / losses) if losses else _metric(reason='no_realized_losses' if outcomes else 'no_closed_portions'),
                        average_net_pnl=str(sum(outcomes, Decimal(0)) / len(outcomes)) if outcomes else None)
         return dict(policy='fifo_closed_portions_v1', slippage='already_in_execution_prices_not_subtracted_again',
                     count_unit='closed_entry_lot_portion_not_position_episode', summary=summary,
@@ -114,7 +165,7 @@ def analyze_risk(nav_rows):
     """Additional descriptive risk measures; no out-of-sample certification."""
     with localcontext(Context(prec=28)):
         rows = list(nav_rows)
-        metrics = calculate_metrics(rows, [])
+        metrics = _report_metrics(rows)
         base_reason = metrics['total_return']['reason']
         names = ('sortino', 'calmar', 'max_drawdown_duration_calendar_days', 'mean_exposure', 'invested_session_fraction')
         report = dict(definitions=dict(sortino_target_per_session='0', downside_denominator='all_declared_session_returns',
@@ -125,11 +176,15 @@ def analyze_risk(nav_rows):
             report.update({name: _metric(reason=base_reason) for name in names})
             return report
         values = [_decimal(row['nav']) for row in rows]
-        returns = [float(b / a - 1) for a, b in zip(values, values[1:])]
-        downside = math.sqrt(math.fsum(min(value, 0) ** 2 for value in returns) / len(returns)) if returns else 0
-        report['sortino'] = _metric(math.fsum(returns) / len(returns) / downside * math.sqrt(252)) if downside else _metric(reason='no_downside_returns' if returns else 'insufficient_returns')
+        return_metrics = [_bounded_metric(lambda a=a, b=b: b / a - 1) for a, b in zip(values, values[1:])]
+        if any(row['value'] is None for row in return_metrics):
+            report['sortino'] = _metric(reason='numeric_range_unavailable')
+        else:
+            returns = [row['value'] for row in return_metrics]
+            downside = math.sqrt(math.fsum(min(value, 0) ** 2 for value in returns) / len(returns)) if returns else 0
+            report['sortino'] = _bounded_metric(lambda: math.fsum(returns) / len(returns) / downside * math.sqrt(252)) if downside else _metric(reason='no_downside_returns' if returns else 'insufficient_returns')
         drawdown = abs(metrics['max_drawdown']['value'])
-        report['calmar'] = _metric(metrics['cagr']['value'] / drawdown) if drawdown and metrics['cagr']['value'] is not None else _metric(reason='zero_drawdown' if not drawdown else metrics['cagr']['reason'])
+        report['calmar'] = _bounded_metric(lambda: metrics['cagr']['value'] / drawdown) if drawdown and metrics['cagr']['value'] is not None else _metric(reason='zero_drawdown' if not drawdown else metrics['cagr']['reason'])
         peak, peak_day, duration, underwater = values[0], date.fromisoformat(rows[0]['session']), 0, False
         for row, value in zip(rows[1:], values[1:]):
             day = date.fromisoformat(row['session'])
@@ -180,22 +235,28 @@ def _build_analysis(result, dataset, *, benchmark_series_key):
         with localcontext(Context(prec=28)):
             initial_nav = _decimal(result['rows'][0]['nav'])
             rows = [dict(session=day, nav=str(initial_nav * bars[day].close / first.close) if first and day in bars else None,
+                         close=str(bars[day].close) if day in bars else None,
                          observation_id=bars[day].observation_id if day in bars else None,
                          input_hash=bars[day].input_hash if day in bars else None) for day in sessions]
-        missing = [row['session'] for row in rows if row['nav'] is None]
-        metrics = calculate_metrics(rows, []) if not missing else None
-        report['benchmark'] = dict(status='incomplete' if missing else 'available', reason='incomplete_benchmark_sessions' if missing else None,
+        missing = [day for day in sessions if day not in bars]
+        normalization_missing = [row['session'] for row in rows if row['nav'] is None]
+        normalization_reason = 'benchmark_initial_anchor_missing' if first is None else None
+        metrics = _report_metrics(rows) if not normalization_missing else None
+        benchmark_reason = normalization_reason or ('incomplete_benchmark_sessions' if missing else None)
+        report['benchmark'] = dict(status='unavailable' if normalization_reason else 'incomplete' if missing else 'available', reason=benchmark_reason,
             series_key=benchmark_series_key, series_identity={field: getattr(identity, field) for field in identity.__dataclass_fields__},
             policy=dict(kind='normalized_close_price_zero_cost_v1', anchor_session=sessions[0], anchor_nav=str(initial_nav),
                         costs='zero', dividends='not_modeled', execution='none_price_comparison_not_buy_and_hold_execution',
                         missing_marks='null_no_carry', strategy_costs='retained_in_strategy_nav'),
-            rows=rows, missing_sessions=missing, metrics=metrics)
-        reason = 'incomplete_benchmark_sessions' if missing else 'stale_strategy_marks' if any(row.get('stale_mark_series_keys') for row in result['rows']) else None
+            rows=rows, missing_sessions=missing, normalization_unavailable_sessions=normalization_missing,
+            normalization_reason=normalization_reason, metrics=metrics)
+        reason = benchmark_reason or ('stale_strategy_marks' if any(row.get('stale_mark_series_keys') for row in result['rows']) else None)
         strategy_return = result['metrics']['total_return']
         if reason or strategy_return['value'] is None:
             difference = _metric(reason=reason or strategy_return['reason'])
         else:
-            difference = _metric(strategy_return['value'] - metrics['total_return']['value'])
+            benchmark_return = metrics['total_return']
+            difference = _metric(strategy_return['value'] - benchmark_return['value']) if benchmark_return['value'] is not None else _metric(reason=benchmark_return['reason'])
         report['comparison'] = dict(total_return_difference=difference, interpretation='strategy_net_price_return_minus_zero_cost_benchmark_price_return')
     report['code_hash'] = hashlib.sha256(Path(__file__).read_bytes() + Path(__file__).with_name('__init__.py').read_bytes()).hexdigest()
     report['analysis_id'] = canonical_hash(report)

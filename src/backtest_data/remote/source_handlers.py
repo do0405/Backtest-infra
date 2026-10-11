@@ -546,8 +546,10 @@ def run_owned_handlers(engine,raw_root,*,manifest_id,slots,owned_sources,checkpo
             dumps(updated);dumps(outcome)
         except Exception as exc:
             updated=_recover_committed_state(name,engine,scope,work_root,state.get(name),slot.get('adjustment','split'))
+            sqlstate=getattr(getattr(exc,'orig',None),'sqlstate',None)
+            temporary=bool(sqlstate and (sqlstate.startswith('08') or sqlstate in {'57P01','57P02','57P03'})) or sqlstate=='57014' and 'statement timeout' in str(getattr(exc,'orig','')).lower()
             outcome={'handler':name,'status':'source_error','reason':type(exc).__name__,'coverage_complete':False,
-                'checkpoint_recovered':updated is not None}
+                'checkpoint_recovered':updated is not None,'retryable':temporary}
         if updated is not None:state[name]=updated
         outcomes.append(outcome)
     result={'source_handler_state':state,'source_handler_outcomes':outcomes,'coverage_complete':False}
