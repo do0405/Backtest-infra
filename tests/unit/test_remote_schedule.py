@@ -177,6 +177,18 @@ def test_cli_snapshot_refuses_changed_concurrency_fence(monkeypatch):
         client_snapshot(monkeypatch,cancel="true")
 
 
+def test_repository_read_uses_canonical_endpoint_without_trailing_slash(monkeypatch):
+    value=module();seen=[]
+    def request(gh,args,**kwargs):
+        seen.append(args)
+        if args!=["api","repos/owner/repo"]:
+            raise RuntimeError("repository_endpoint_not_found")
+        return b'{"default_branch":"main"}'
+    monkeypatch.setattr(value,"github",request)
+    assert value.GitHubSchedule("gh","owner/repo").api("")=={"default_branch":"main"}
+    assert seen==[["api","repos/owner/repo"]]
+
+
 def host():
     path=Path(__file__).parents[2]/"scripts/remote_schedule_watchdog.py"
     spec=importlib.util.spec_from_file_location("watchdog_host",path)

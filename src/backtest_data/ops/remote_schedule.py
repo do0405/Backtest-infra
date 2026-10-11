@@ -123,7 +123,8 @@ class GitHubSchedule:
         self.branch = None
 
     def api(self, suffix):
-        return json.loads(github(self.gh, ["api", f"repos/{self.repository}/{suffix}"], timeout=30))
+        path = f"repos/{self.repository}" + ("/" + suffix if suffix else "")
+        return json.loads(github(self.gh, ["api", path], timeout=30))
 
     def snapshot(self):
         repo = self.api("")
