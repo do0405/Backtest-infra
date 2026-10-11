@@ -189,6 +189,22 @@ def test_repository_read_uses_canonical_endpoint_without_trailing_slash(monkeypa
     assert seen==[["api","repos/owner/repo"]]
 
 
+def test_native_schedule_preserves_two_hour_cadence_and_serial_fence():
+    import yaml
+    path=Path(__file__).parents[2]/".github/workflows/remote-data-update.yml"
+    doc=yaml.load(path.read_text(encoding="utf-8"),Loader=yaml.BaseLoader)
+    schedule=doc["on"]["schedule"]
+    assert len(schedule)==1
+    minute,hours,day,month,weekday=schedule[0]["cron"].split()
+    assert 0<=int(minute)<=59 and (day,month,weekday)==("*","*","*")
+    if hours=="*/2":values=list(range(0,24,2))
+    else:
+        bounds,step=hours.split("/");start,end=map(int,bounds.split("-"))
+        values=list(range(start,end+1,int(step)))
+    assert len(values)==12 and all((values[(i+1)%12]-values[i])%24==2 for i in range(12))
+    assert doc["concurrency"]=={"group":"private-remote-source-account-owner","cancel-in-progress":"false"}
+
+
 def host():
     path=Path(__file__).parents[2]/"scripts/remote_schedule_watchdog.py"
     spec=importlib.util.spec_from_file_location("watchdog_host",path)
