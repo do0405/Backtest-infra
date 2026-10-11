@@ -74,8 +74,13 @@ def write_bundle(root, rows, *, stream_id, sequence, scope, created_at=None, che
 def read_manifest(bundle, *, expected_manifest_hash=None):
     path = safe_path(bundle, "manifest.json")
     if path.stat().st_size > 128 * 1024 * 1024: raise ValueError("manifest size bound exceeded")
-    if expected_manifest_hash and digest(path) != expected_manifest_hash: raise ValueError("manifest hash mismatch")
-    raw = json.loads(path.read_text(encoding="utf-8")); decoded = loads(path.read_text(encoding="utf-8"))
+    # Hash, structural checks and private/typed-state validation must use the
+    # same bytes. A portable checkpoint can be large on a slow local disk.
+    content = path.read_bytes()
+    if len(content) > 128 * 1024 * 1024: raise ValueError("manifest size bound exceeded")
+    if expected_manifest_hash and hashlib.sha256(content).hexdigest() != expected_manifest_hash: raise ValueError("manifest hash mismatch")
+    encoded = content.decode("utf-8")
+    raw = json.loads(encoded); loads(encoded)
     if raw.get("format") != "backtest_remote_delta_v1" or raw.get("schema_version") != "c71302d6b910": raise ValueError("unsupported bundle version")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", raw.get("stream_id", "")) or type(raw.get("sequence")) is not int or raw["sequence"] < 1: raise ValueError("invalid stream sequence")
     try: uuid.UUID(raw["bundle_id"])

@@ -71,6 +71,24 @@ def test_bundle_manifest_hashes_and_whole_scope_round_trip(tmp_path):
     assert manifest["checkpoint"] == {"completed_task_ids": []}
 
 
+def test_manifest_shape_and_private_state_are_validated_from_same_bytes(tmp_path,monkeypatch):
+    from pathlib import Path
+    path=bundle(tmp_path);file=path/'manifest.json'
+    clean=file.read_text(encoding='utf-8')
+    value=json.loads(clean);value['checkpoint']={'database_url':'hidden'}
+    changed=json.dumps(value);file.write_text(changed,encoding='utf-8')
+    original=Path.read_text;reads=0
+    def alternating(self,*args,**kwargs):
+        nonlocal reads
+        if self==file:
+            reads+=1
+            return changed if reads==1 else clean
+        return original(self,*args,**kwargs)
+    monkeypatch.setattr(Path,'read_text',alternating)
+    with pytest.raises(ValueError,match='private'):
+        remote('bundle').read_manifest(path)
+
+
 def test_bundle_tamper_and_path_traversal_are_rejected(tmp_path):
     path = bundle(tmp_path)
     payload = path / "rows.ndjson.gz"

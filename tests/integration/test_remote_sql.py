@@ -36,7 +36,17 @@ def test_import_preserves_clock_and_precision_and_replay_inserts_zero(db_session
     rows = [{"table": "source_contract", "values": c}, {"table": "supplemental_document", "values": d}, {"table": "supplemental_observation", "values": o}]
     path = write_bundle(tmp_path, rows, stream_id="test-"+str(uuid.uuid4()), sequence=1, scope=SCOPE, created_at=STAMP)
     first = import_bundle(db_session, path, imported_at=datetime(2026,10,11,tzinfo=timezone.utc))
+    # Replay needs the receipt identity/hash, not its potentially large saved
+    # queue/raw checkpoint. Keep it out of SQL result payloads.
+    from sqlalchemy import event
+    statements=[]
+    def record(connection,cursor,statement,parameters,context,executemany):
+        if 'FROM remote_import_receipt' in statement:statements.append(statement)
+    event.listen(db_session.bind,'before_cursor_execute',record)
+    db_session.expire_all()
     second = import_bundle(db_session, path)
+    event.remove(db_session.bind,'before_cursor_execute',record)
+    assert statements and all('remote_import_receipt.checkpoint' not in sql for sql in statements)
     assert first['inserted_rows'] == 3
     assert second['inserted_rows'] == 0
     observed = db_session.get(SupplementalObservation, o['id'])

@@ -109,8 +109,17 @@ The first successful hosted generation on 2026-10-11 was run 38115965869:
 10,074 KRX observation rows and 28 response captures were committed to its
 published delta, with the original scope and unfinished queue checkpoint. The
 earlier run 38115771203 failed before acquisition at a missing runtime dependency;
-it remains a separate failed attempt. A second hosted generation verifies actual
-checkpoint continuation. These rows do not establish whole-period completion.
+it remains a separate failed attempt. Run 38116683206 then published another
+13,973 observations and 28 captures in sequences 4 through 6. The original
+39,330 tasks, subsequent task identities, raw UUIDs/hashes/creation clocks and
+published predecessor hashes were verified across both generations. The second
+generation advanced 28 tasks from its saved checkpoint. These rows do not
+establish whole-period completion.
+
+Manifest hash, structural and typed/private-state checks read one identical byte
+snapshot. SQL replay fetches only the existing receipt ID/hash, avoiding transfer
+of a potentially large saved queue checkpoint. Source validation, exact-row
+comparison and rollback rules remain in force.
 
 KRX quotes are additive evidence. NAV, IV and index values do not establish
 complete product history, exact VWAP or historical index constituents. Successful
