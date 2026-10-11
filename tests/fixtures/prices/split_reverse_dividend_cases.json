@@ -1,0 +1,11 @@
+{
+  "description": "Synthetic invariant fixtures; no production coverage claim",
+  "cases": [
+    {"kind": "split", "new_shares_per_old_share": "2", "price": "100", "volume": "100", "notional": "10000", "adjusted_price": "50", "adjusted_volume": "200"},
+    {"kind": "reverse_split", "new_shares_per_old_share": "0.1", "price": "100", "volume": "100", "notional": "10000", "adjusted_price": "1000", "adjusted_volume": "10"},
+    {"kind": "cash_dividend", "prior_close": "100", "ex_close": "90", "cash_per_pre_event_share": "10", "gross_return_factor": "1"},
+    {"kind": "spinoff", "expected_derived_status": "unsupported_action"},
+    {"kind": "rights", "expected_derived_status": "unsupported_action"},
+    {"kind": "merger", "expected_derived_status": "unsupported_action"}
+  ]
+}

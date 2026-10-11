@@ -1,0 +1,21 @@
+# Free supplemental source ingestion plan
+
+User authorization: collect free official listing lifecycle, ETF/ETN product and portfolio data, index history, and Alpaca action/trade inputs without stopping or duplicating existing collectors. Preserve the original KR4507/US13251 target and2016-01-01~2026-10-07 scope.
+
+Architecture review seam: independent immutable source documents and typed supplemental observations own external source identities and source clocks. They do not adopt canonical security identities, verified corporate-action coverage, financial public PIT, or exact VWAP by fetching successfully. Existing releases and workers remain untouched.
+
+The selected approach is additive source staging rather than overwriting existing security/price/fundamental rows. A raw-only archive would not meet the SQL requirement; automatic promotion would invent missing identity and public-time proofs. Source body hashes, raw identifiers and separate capture/report/filing/publication/announcement/effective clocks accompany typed amounts, quantities, weights and event dates.
+
+Delegation route: native independent source research and pure parsers; two child agents maximum, inherited parent tier, no recursive delegation. Parent owns schema/storage/transport/NPORT/index/lifecycle/orchestration, product worker owns issuer_products.py/tests, Alpaca worker owns alpaca_inputs.py/tests.
+
+- [x] Write clock/exact-number/immutable SQL regressions; add supplemental models/storage and additive migrations c71302d6b906~908. Production init was additive only.
+- [ ] Connect official SEC N-PORT quarter catalog from2019Q4 through2026Q3, streaming ZIP/TSV parsing and checkpoints. Keep filing date distinct from verified dissemination;2016~2019 source gap remains explicit.
+- [ ] Finish every EDGAR quarter master index in requested2016~2026 period and store Form25/25-NSE accession metadata as delisting filings, not proven last trading dates. Traversal is connected and running. AlphaVantage private configuration and rolling25/day ledger are connected; four historical whole-list snapshots/33,171 rows were verified in SQL. Daily traversal remains incomplete.
+- [ ] Parse whole KODEX/TIGER/iShares catalogs and available dated portfolio/distribution downloads. Explicit target dates exclude future PCF snapshots; current prices embedded in historical PCFs are excluded from historical holding valuation. Closed products absent from live catalogs remain gaps.
+- [ ] Parse all LSEG announcement catalog pages for2016~2026; preserve original family, announcement/effective date and gated notice URLs. Store reachable official S&P constituent-change tables. Free announcement records do not provide complete weights or a complete starting constituent snapshot. KRX composition web access denied remains blocked; approved KRX OpenAPI workers stay unchanged.
+- [ ] Connect Alpaca all-type corporate-action pagination and SIP trade pages. Preserve process_date versus ex/effective dates. Cross-source equality needs explicit identity and independent provenance. Candidate trade N/D use exactly the same declared population; unknown conditions, incomplete traversal or unverified action coverage prevent exact certification.
+- [x] Run separate PostgreSQL tests, actual source requests, actual SQL inserts and SQL reads. Register one isolated resumable supplemental worker and extend the existing read-only2hour monitor. No old queue was replayed or repaired.
+
+Operational bounds: new work has explicit execution budget and disk-free guard on E, source-shared call slots, bounded response sizes, independent lock and preserved progress. Budgets pause work without shrinking period or universe. Gaps and paid access are recorded rather than silently switching sources. No login, subscription, order or access-block bypass.
+
+2026-10-10 operating handoff: auxiliary.supplemental_sources run20261010T052651Z-supplemental is running, with dynamic paths in kr-full-workers.json. Original worker PIDs/results/paths were verified preserved. PostgreSQL healthy and data disk present on E. The full-period checkboxes remain open because ongoing traversal and unresolved source gaps are not data completion. See docs/data/supplemental-sources.md and timestamped SQL verification artifacts.

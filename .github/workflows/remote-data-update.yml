@@ -1,0 +1,99 @@
+name: Remote data update (inactive until ownership handoff)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 5,7 * * 1-5'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: private-remote-source-account-owner
+  cancel-in-progress: false
+jobs:
+  update:
+    if: vars.REMOTE_PIPELINE_ENABLED == 'true' && vars.REMOTE_FREE_BUDGET_APPROVED == 'true' && vars.REMOTE_IDENTITY_HANDOFF_READY == 'true' && (github.event.repository.private == true || vars.REMOTE_DATA_PUBLIC_ALLOWED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16.10
+        env:
+          POSTGRES_USER: backtest
+          POSTGRES_PASSWORD: ephemeral-runner-only
+          POSTGRES_DB: backtest_remote
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U backtest -d backtest_remote"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      BACKTEST_DATABASE_URL: postgresql+psycopg://backtest:ephemeral-runner-only@localhost:5432/backtest_remote
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      PRIVATE_CAP_BYTES: ${{ vars.REMOTE_PRIVATE_STORAGE_CAP_BYTES }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13.13'
+      - name: Install exact runtime without dependency resolution
+        run: |
+          python -m pip install --no-deps -r scripts/remote-requirements.txt
+          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip check
+      - name: Restore newest private committed artifact; fail without bootstrap
+        run: |
+          test -n "$PRIVATE_CAP_BYTES"
+          gh api "repos/$REPOSITORY/actions/artifacts?per_page=100" > /tmp/artifact-inventory.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          inventory=json.loads(Path('/tmp/artifact-inventory.json').read_text())
+          artifacts=[x for x in inventory['artifacts'] if not x['expired']]
+          if inventory['total_count']>100: raise SystemExit('Account artifact inventory requires configured durable store; acquisition deferred')
+          states=[x for x in artifacts if x['name']=='remote-private-state']
+          if not states: raise SystemExit('Private whole-target bootstrap state is missing')
+          if sum(x['size_in_bytes'] for x in artifacts)>=int(os.environ['PRIVATE_CAP_BYTES']): raise SystemExit('Private free-storage budget deferred; existing artifacts retained')
+          Path('/tmp/state-artifact-id').write_text(str(states[0]['id']))
+          PY
+          gh api "repos/$REPOSITORY/actions/artifacts/$(cat /tmp/state-artifact-id)/zip" > /tmp/private-state.zip
+          python scripts/remote_restore.py /tmp/private-state.zip remote-private-store --max-bytes "$PRIVATE_CAP_BYTES"
+      - name: Apply schema in ephemeral PostgreSQL only
+        run: python -m alembic upgrade head
+      - name: Run bounded acquisition with explicitly transferred ownership
+        env:
+          REMOTE_OWNERSHIP: ${{ secrets.REMOTE_OWNERSHIP_JSON }}
+          BACKTEST_SEC_USER_AGENT: ${{ secrets.BACKTEST_SEC_USER_AGENT }}
+          OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+        run: |
+          umask 077
+          mkdir -p remote-work
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          Path('remote-work/ownership.json').write_text(os.environ['REMOTE_OWNERSHIP'])
+          PY
+          python scripts/remote_cycle.py --ownership remote-work/ownership.json --private-store remote-private-store --work remote-work --budget-seconds 600 --max-private-bytes "$PRIVATE_CAP_BYTES"
+      - name: Verify aggregate retained artifact budget before publishing
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          old=sum(x['size_in_bytes'] for x in json.loads(Path('/tmp/artifact-inventory.json').read_text())['artifacts'] if not x['expired'])
+          new=sum(x.stat().st_size for x in Path('remote-private-store').rglob('*') if x.is_file())
+          if old+new*2>int(os.environ['PRIVATE_CAP_BYTES']): raise SystemExit('Private artifact quota deferred; prior committed state unchanged')
+          PY
+      - name: Commit private state and data only; never config or SQL dump
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-private-state
+          path: remote-private-store/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0

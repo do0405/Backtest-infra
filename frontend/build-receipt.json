@@ -1,0 +1,94 @@
+{
+  "build_time_utc": "2026-10-11T04:19:56.3344255Z",
+  "node": "24.15.0",
+  "npm": "11.12.1",
+  "tests": "12 passed, 5 files",
+  "build": "vite 8.3.4 success",
+  "source_copy_verified": true,
+  "files": [
+    {
+      "path": "src/api.js",
+      "sha256": "0a89b62f741ddff573b16ac04c06c1f1f58914d821e5e034339c1f0b95cda661"
+    },
+    {
+      "path": "src/App.jsx",
+      "sha256": "f92e09bd67e69a5cb95fe27a04eca1a6828beb06412ee958aeed84d23a330a9b"
+    },
+    {
+      "path": "src/main.jsx",
+      "sha256": "1f72c3f64a2b8ddd7e76262255a6beb45e0d59e80012066ac92e73cdd81f38c1"
+    },
+    {
+      "path": "src/model.js",
+      "sha256": "882c9c97eaba3a8562575b66c3551d01e2fe2a68233e5665a31f721e0236cbe8"
+    },
+    {
+      "path": "src/styles.css",
+      "sha256": "f810ecd9e5ba6842fa4d038abf55a06aa7217c78e03543bd08a9eff2de153a97"
+    },
+    {
+      "path": "src/components/Charts.jsx",
+      "sha256": "8b4ddead19ce0b6716d235edddd07d9460419f00862590a712c561be8c756d39"
+    },
+    {
+      "path": "src/components/SecurityPicker.jsx",
+      "sha256": "dd4bab6661212a6bbd5057e48b77c65a246b69cf542b9d569808e9f5d7d963c4"
+    },
+    {
+      "path": "src/components/Shared.jsx",
+      "sha256": "97d145ab4ad766c503b6a8a7b87903958c34f0cbfbd5f607127fe10f332afad9"
+    },
+    {
+      "path": "src/components/TraceExplorer.jsx",
+      "sha256": "0c45290fdfd9dc84ee46160a6b9018f4e6a4139bad52edeb5d25677a7e883547"
+    },
+    {
+      "path": "tests/api.test.js",
+      "sha256": "b0071128e2f25437d124b5dcd96cba7c4ccd6ff3a80506baa37bf6853c197cc1"
+    },
+    {
+      "path": "tests/App.restore.test.jsx",
+      "sha256": "83c1bbcc24af5472e26eecbaca4742792c89a57abbdff92f12572009b683dd16"
+    },
+    {
+      "path": "tests/model.test.js",
+      "sha256": "06c881583f243d8c4593a84e12a8ef372cea85ff3fc181a9886441117854822c"
+    },
+    {
+      "path": "tests/SecurityPicker.test.jsx",
+      "sha256": "b91049a6708dda6f23bb96ac331a7b7babb87ffbd234265b3340069ecd3de5d9"
+    },
+    {
+      "path": "tests/TraceExplorer.test.jsx",
+      "sha256": "fe88c9581b7a8230e45fa56e8d4ff9036fcf98d5964cbeb6ed116be544b6259e"
+    },
+    {
+      "path": "dist/index.html",
+      "sha256": "e29b011589970ce8935c3c587b0e90dec811433f6104faa1aabd39120ebf12d5"
+    },
+    {
+      "path": "dist/assets/index-BLpjHUH-.css",
+      "sha256": "d7d2b42f3ee15ea6fe4cad8dde354032e8bfb66b3c3dfbdcc1799af336f60370"
+    },
+    {
+      "path": "dist/assets/index-uXDOz3qs.js",
+      "sha256": "81c1e81dffca4e135b1220287cd08fcf9bfb42a1faacf64acc9da6add99973ae"
+    },
+    {
+      "path": "package.json",
+      "sha256": "ed24869923dd801bae4e01dc1fe18c9b4e632d05e41657b7009d0904639dfa16"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "e94af297af0c111139cca71a6ad7f89db8f457043f49118dd6db2832cffae66a"
+    },
+    {
+      "path": "vite.config.js",
+      "sha256": "9a14d5ea61c49c508cf256d0f9e58b0e2dd77de75e93eb02da6ba7389168fb74"
+    },
+    {
+      "path": "index.html",
+      "sha256": "0d30a06145d3ecaedf645f3b510c89ac7f6430f120fb7a6368268a55b86c42ea"
+    }
+  ]
+}

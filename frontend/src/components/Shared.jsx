@@ -1,0 +1,7 @@
+import React from 'react';
+import { exact, reasonLabel } from '../model.js';
+export function Empty({ title = '아직 자료가 없습니다', children }) { return <div className="empty"><span className="empty-icon">↗</span><h3>{title}</h3><p>{children}</p></div>; }
+export function Panel({ title, eyebrow, children, extra, className = '' }) { return <section className={`panel ${className}`}><header className="panel-head"><div>{eyebrow && <span className="eyebrow">{eyebrow}</span>}<h2>{title}</h2></div>{extra}</header>{children}</section>; }
+export function Evidence({ items = [] }) { return <div className="evidence-list">{items.map(item => <span className="evidence" key={item} title={item}>{reasonLabel(item)}</span>)}</div>; }
+export function JsonDetails({ title, value }) { return <details className="json-details"><summary>{title}</summary><pre>{JSON.stringify(value, null, 2)}</pre></details>; }
+export function ExactTable({ columns, rows, caption }) { return <div className="table-wrap"><table><caption className="sr-only">{caption}</caption><thead><tr>{columns.map(([key, label]) => <th key={key} scope="col">{label}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={row.observation_id || row.id || `${row.session}-${index}`}>{columns.map(([key, , render]) => <td key={key} className={render ? '' : 'numeric'}>{render ? render(row[key], row) : exact(row[key])}</td>)}</tr>)}</tbody></table>{!rows.length && <p className="table-empty">해당 기록이 없습니다.</p>}</div>; }

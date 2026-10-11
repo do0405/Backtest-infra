@@ -1,0 +1,51 @@
+# Clean dataset completion within verified evidence
+
+User authorized completing all feasible work and actual SQL supplementation. Preserve the full KR 4,507 / US 13,251 universe, original captures, publication versions and sealed v5/v6 releases.
+
+## Boundaries
+
+- Resume existing collectors and fixed public-PIT audit with bounded database-only recovery. Do not restart maintenance-blocked providers repeatedly.
+- Persist coverage run/member/result/gap tables over the full target. Unknown exchange calendars, historical listing eligibility and expected fiscal periods are explicit unknowns, not fabricated complete coverage.
+- Add release_query_v7: reconstructed raw prices use a conservative completed local-day clock irrespective of acquisition time; same-day bars and future market sessions are excluded. Keep raw capture clocks and older query semantics. Adjusted prices remain unavailable without verified action coverage; present-day adjustment factors never leak into earlier cutoffs.
+- v7 financial outputs require exact qualified publication evidence, including every dependency; no capture-only fallback becomes historical PIT. Original and correction evidence remain independently dated. Existing observed-system physical-clock tests remain.
+- Evidence-bound SEC fiscal metadata supplements and canonical qualification are append-only. Derive quarters/TTM/ratios only for compatible source periods, accounting scope, currency and share basis. Persist missing reasons instead of filling zero or estimating quarters.
+- Exact VWAP requires matched numerator/denominator and action coverage across share bases. Existing KIS amounts/volumes have unverified eligibility: preserve source values, report the source-contract gap, do not promote to exact VWAP.
+- Research release can fix a declared recent price-session interval for every target security, retaining the full universe and explicit excluded domains. Preserve the one-million-row budget; never silently truncate membership.
+
+## Ownership / verification
+
+Parent owns recovery, CLI hooks and versioned release/query policy. Coverage child owns new coverage package/migration/tests; financial child owns semantic supplementation modules/tests. At most two children, no recursive delegation, one writer per file. Separate test PostgreSQL for mutations and disconnect test. Production writes are additive migrations, coverage results, source-bound semantic assertions and reproducible partial release seals. Supply-side gaps remain incomplete and monitored.
+
+## Deliverables
+
+1. Verified checkpoint resume and existing two-hour read-only monitor updated for retry attempts.
+2. Whole-universe SQL coverage with a cursor and counts of processed/pending securities.
+3. v7 no-lookahead price and strict public-financial policies with boundary regressions.
+4. Actual SQL semantic/metric supplementation or precise persisted missing-input results.
+5. Bounded price research release and cutoff-query verification; report external evidence still needed for actions, delisted identity, products and index history.
+
+## Actual execution and limits
+
+The production whole-universe coverage run is `1b5527a5-b914-4154-ad4c-4969d7f65755`, with all 17,758 members persisted and a fixed audit watermark of `2026-10-09T16:15:32.297125Z`. Its cursor was still zero at 02:54 KST while concurrent support indexes completed. This is a pending operational audit, not an already completed missing-data table. The detached `auxiliary.clean_completion` pipeline waits for index readiness before traversing the complete run, refetching exact-hash SEC metadata, materializing all stored-document semantic inputs and sealing/verifying the declared price interval. Every batch preserves its original source clocks.
+
+Actual SQL supplementation added 72 canonical versions of 36 standard-mapped SEC facts and one exact-hash DEI assertion. These inputs remain unqualified for historical metrics because public version, statement scope and/or fiscal-year-start/share-basis evidence is missing. A separate detached `auxiliary.metric_evaluation` waits for the complete input audit, then evaluates registered pure metrics at `2026-10-08T04:00:00Z` using v7. The 48-entry registry includes revenue, basic/diluted EPS and operating-income growth (QoQ, YoY, TTM YoY and annual), ROE/ROA, margins, FCF and valuation families. Six price/share-class valuation metrics remain separately blocked rather than guessed. Zero successful results must be reported as missing eligible inputs.
+
+V7 now supports a bounded financial-document research scope as well as the exclusive price scope. The original/correction/capture boundary and actual SQL revenue-growth regression pass on both v6 and v7, with capture-only input excluded under v7. Every dependency retains its own public cutoff and original-body metadata qualification. Existing v5/v6 policies and seals stay unchanged. Before returning v7 derived metrics, query-time revision selection must also exclude calculations pinned to superseded originals after a certified correction.
+
+The storage/collector interruption was repaired independently: Docker init and direct bounded health checks prevent the reproduced orphan-child exit2 path from reinitializing PostgreSQL. The same E volume, image, database identity and existing seals were verified. Bounded DB-only recovery covers startup failures without SQLSTATE and SQLAlchemy's invalidated Connection code `8s2b`; failed Session code `7s2a` remains permanent. No supplier access/maintenance error triggers repeated restart.
+
+Remaining evidence acquisition is concrete: approved KRX services can supplement domestic daily trading amount/volume and product observations; existing KIS remains the current KR/US raw-price source. Alpaca's [historical-data plan](https://docs.alpaca.markets/us/docs/about-market-data-api) advertises data from 2016 and excludes the most recent 15 minutes on Basic; authenticated historical SIP access must be verified for the actual account before use. Current keys are unavailable and the user handles account preparation. Returned bar VWAP and general volume do not prove an exact matched trade numerator/denominator. Corporate-action event/no-event intervals, historical delisted security identity, ETF/ETN NAV/holdings/terms and historical index constituent changes require their own source evidence; current master lists, adjusted close and current holdings do not complete these histories. No new source authorization is implied by the monitor.
+
+Future monitoring stays ACTIVE every two hours, reads the latest worker/auxiliary metadata and reports only meaningful changes. The one-day full-denominator price seal is `research_partial`, not full-period completion or production activation. Both actual seal creation and the production cutoff-query receipt must exist before reporting verification success.
+
+## Verified handoff at 2026-10-10 03:21 KST
+
+- Production schema is `c71302d6b904`; all three support indexes completed. The extra early price research build retained an old read snapshot and delayed concurrent validation. Only that verified extra native process was deliberately stopped, with `operator-stop.json` in its run directory; the ordered pipeline advanced immediately to the full coverage stage. This planned research-build interruption is not collector failure. Original source rows, captures, decisions and existing sealed releases remain unchanged.
+- The whole-universe coverage run has the full KR4,507/US13,251 membership and an actual committed first summary/gap batch (`cursor=1`). The pipeline resumes that exact cursor, rather than using a sample target. The first member had 2,228 observed raw sessions and 2,143 structurally eligible sessions. Its 666 provisional weekday gaps include unknown holiday/prelisting eligibility and must not be stated as 666 confirmed missing trading days.
+- Initial whole stored-canonical v7 metric evaluation covered 12 issuers and attempted 504 pure metrics: zero successful, 504 unavailable, zero derived inserts. Reasons include missing qualified publication evidence and quarterly/annual inputs. These are actual SQL evaluation results, not a claim that all target issuers already have canonical inputs. The six valuation metrics were explicitly excluded from the pure evaluator and remain in SQL input-gap audits. The later whole-document completion and its dependent evaluator are still running/waiting.
+- Fixed publication audit progress reached 399 checked documents with zero qualified and 399 unavailable at 03:04 KST; later results must be read from current progress. This count is not all 6,978 documents. Source maintenance, archive access and exact-binding ambiguities remain separate gaps.
+- Query-time v7 derived input checks now require latest certified source and canonical versions. Approved same-account taxonomy-year changes cannot bypass a source-only correction. Same-public-bound equal numeric values with conflicting fiscal labels, reporting flags, sign or arithmetic components fail closed. Equivalent duplicates with the same arithmetic semantics remain valid. V5/v6 semantics stay unchanged.
+- V7 document proof resolution is indexed/cached per frozen query, document, cutoff, history mode and pinned proof scope. Nested derived scopes intersect; withdrawals/rejections remain visible. Original-body metadata checks visit only the selected proof IDs. The scale regression verifies a single document resolution across repeated accounts with 1,000 unrelated proofs, without changing public-clock policy.
+- Final combined verification passed 784 tests before the last review refinements, followed by 65 parent-run tests on the stable final public/metric/metadata boundary code. The final child-specific pass was 63 tests; these overlap and must not be added as unique test counts. All SQL tests use the separate `_test` database, and local compile/diff checks pass.
+
+The two-hour monitor remains ACTIVE. It distinguishes traversal/audit/evaluation/seal completion from clean eligibility and continues Docker/E-storage checks after data work ends. Exact VWAP, corporate-action ledger/no-event coverage, adjusted-price eligibility, historical listing identity, product history and historical index membership remain unresolved source obligations.
