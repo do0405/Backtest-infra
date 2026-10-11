@@ -25,6 +25,7 @@ from ..prices.provider_basis import classify_price_basis
 from ..prices.supplier_collection import collect_supplier_adjusted
 from ..prices.supplier_models import SupplierPriceCollectionState
 from ..prices.supplier_refresh_models import SupplierPriceRefreshState
+from ..ops.source_cadence import provider_ready_date, krx_original_complete
 from .codec import PaginationCursor, dumps
 
 AUTHORITY = 'new_remote_ephemeral_database'
@@ -118,7 +119,7 @@ def refresh_work_windows(state,*,as_of):
     return work
 
 
-def krx_plan_window(scope,*,as_of,prior=None,max_calendar_days=31,completed_through=None):
+def krx_plan_window(scope,*,as_of,prior=None,max_calendar_days=31,completed_through=None,original_complete=False):
     """Bound planning work, retaining every original calendar date and service.
 
     Explicit refresh requests carry a local-day anchor and the original scope.
@@ -128,6 +129,7 @@ def krx_plan_window(scope,*,as_of,prior=None,max_calendar_days=31,completed_thro
     if type(max_calendar_days) is not int or not 1<=max_calendar_days<=366:raise ValueError('bounded KRX planning batch required')
     completed=as_of.astimezone(ZoneInfo('Asia/Seoul')).date()-timedelta(days=1)
     anchor=as_of.astimezone(ZoneInfo('Asia/Seoul')).date()
+    ready=provider_ready_date('krx',as_of) if original_complete else completed
     first=ORIGINAL_START
     if prior is not None:
         _binding(prior,scope)
@@ -144,16 +146,31 @@ def krx_plan_window(scope,*,as_of,prior=None,max_calendar_days=31,completed_thro
     if planned>completed:raise ValueError('KRX refresh checkpoint is after completed local day')
     catchup_start=max(ORIGINAL_START,planned+timedelta(days=1))
     refresh=[]
-    if catchup_start<=completed:
-        refresh.append({'kind':'catchup','start':catchup_start,'end':min(completed,catchup_start+timedelta(days=max_calendar_days-1))})
-    rolling_start=max(ORIGINAL_START,completed-timedelta(days=13))
-    if rolling_start<=completed:refresh.append({'kind':'rolling','start':rolling_start,'end':completed})
+    last_ready=date.fromisoformat(prior['last_refresh_ready_date']) if prior and prior.get('last_refresh_ready_date') else None
+    if last_ready is not None and last_ready>completed:raise ValueError('future KRX ready-date checkpoint')
+    due=not original_complete or last_ready is None or ready>last_ready
+    if due and catchup_start<=ready:
+        refresh.append({'kind':'catchup','start':catchup_start,'end':min(ready,catchup_start+timedelta(days=max_calendar_days-1))})
+    rolling_start=max(ORIGINAL_START,ready-timedelta(days=13))
+    if due and rolling_start<=ready:refresh.append({'kind':'rolling','start':rolling_start,'end':ready})
+    if original_complete:anchor=ready+timedelta(days=1)
     result={'scope':copy.deepcopy(scope),'start':first if first<=last else None,'end':last if first<=last else None,
         'services':list(KRX_SERVICES),'full_request_target':((ORIGINAL_END-ORIGINAL_START).days+1)*len(KRX_SERVICES),
         'completed_kr_day':completed,'coverage_complete':False,
-        'rollforward_status':'explicit_completed_day_refresh','refresh_anchor':anchor,'refresh_windows':refresh,
+        'rollforward_status':'publication_gated_completed_pass_refresh' if original_complete else 'explicit_completed_day_refresh',
+        'original_request_pass_complete':original_complete,'provider_ready_date':ready,
+        'refresh_anchor':anchor,'refresh_windows':refresh,
         'refresh_requests_completed_through':since,'refresh_watermark_is_coverage_claim':False}
     return result
+
+
+def _krx_original_complete(engine,scope,previous):
+    if not previous or previous.get('planned_through')!=ORIGINAL_END.isoformat():return False
+    with transaction(engine) as session:
+        jobs=session.scalars(select(CollectionJob).where(CollectionJob.source=='krx',CollectionJob.domain=='market_quotes',
+            CollectionJob.request['manifest_id'].astext==scope['manifest_id'],
+            ~CollectionJob.request.op('?')('refresh_anchor'))).yield_per(1000)
+        return krx_original_complete(jobs,scope,planned_through=previous['planned_through'])
 
 
 def _portable_summary(value):
@@ -183,7 +200,8 @@ def _krx_request_watermark(jobs,since,completed):
 
 def krx_quote_step(engine,raw_root,*,scope,previous,budget_seconds,as_of,completed_through=None,**_):
     _budget(budget_seconds);started=time.monotonic()
-    window=krx_plan_window(scope,as_of=as_of,prior=previous,completed_through=completed_through)
+    original_complete=_krx_original_complete(engine,scope,previous)
+    window=krx_plan_window(scope,as_of=as_of,prior=previous,completed_through=completed_through,original_complete=original_complete)
     state=copy.deepcopy(previous or {'scope':scope,'planned_through':None})
     planned=None
     if window['start'] is not None:
@@ -202,6 +220,8 @@ def krx_quote_step(engine,raw_root,*,scope,previous,budget_seconds,as_of,complet
             refresh_plans.append(plan_krx_quotes(session,manifest,refresh['start'],refresh['end'],services=KRX_SERVICES,
                 refresh=True,refresh_anchor=window['refresh_anchor']))
         if refresh['kind']=='catchup':state['refresh_planned_through']=refresh['end'].isoformat()
+    if len(refresh_plans)==len(window['refresh_windows']) and refresh_plans:
+        state['last_refresh_ready_date']=window['provider_ready_date'].isoformat()
     remaining=budget_seconds-(time.monotonic()-started)
     summary=run_krx_quote_collection(engine,raw_root,budget_seconds=remaining,services=KRX_SERVICES) if remaining>0 else {'status':'budget_deferred'}
     since=window['refresh_requests_completed_through']
@@ -211,6 +231,7 @@ def krx_quote_step(engine,raw_root,*,scope,previous,budget_seconds,as_of,complet
             CollectionJob.request['session_date'].astext<=window['completed_kr_day'].isoformat())).yield_per(1000)
         watermark=_krx_request_watermark(jobs,since,window['completed_kr_day'])
     state.update(completed_kr_day=window['completed_kr_day'],rollforward_status=window['rollforward_status'],
+        original_request_pass_complete=original_complete,provider_ready_date=window['provider_ready_date'],
         refresh_requests_completed_through=watermark.isoformat(),refresh_anchor=window['refresh_anchor'],
         refresh_watermark_is_coverage_claim=False,coverage_complete=False)
     outcome={'handler':'krx_quotes','status':summary['status'],'planning':planned,

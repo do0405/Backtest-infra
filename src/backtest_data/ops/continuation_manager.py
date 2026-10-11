@@ -9,6 +9,7 @@ from uuid import uuid4
 from .continuation_policy import CORE_ROLES,decide
 from .continuation_profiles import ROLES,profile,section
 from .db_recovery import AttemptResult
+from .source_cadence import LOCAL_REFRESH_SOURCES
 
 
 def read_json(path):
@@ -32,8 +33,11 @@ def atomic_json(path,value):
 
 
 class ContinuationManager:
-    def __init__(self,workspace,root,host,*,roles=ROLES,clock=time.time):
+    def __init__(self,workspace,root,host,*,roles=ROLES,clock=time.time,refresh_manifest_id=None):
         self.workspace=Path(workspace);self.root=Path(root);self.host=host;self.roles=tuple(roles);self.clock=clock
+        if refresh_manifest_id is not None and (not isinstance(refresh_manifest_id,str) or not refresh_manifest_id.strip()):
+            raise ValueError('explicit refresh manifest identity required')
+        self.refresh_manifest_id=refresh_manifest_id
         self.metadata=self.workspace/'artifacts/kr-full-workers.json';self.target=self.root/'manager.runtime.json'
         self.state=read_json(self.target) if self.target.exists() else {
             'runtime_schema_version':3,'status':'adopting','started_at':datetime.now(timezone.utc).isoformat(),
@@ -62,7 +66,12 @@ class ContinuationManager:
         generation=entry['runtime']
         if item.get('entry_runtime')!=generation:
             item.update(entry_runtime=generation,next_launch_at=None,requires_user=False,status='observing')
-        elif item.get('status') in ('complete','operator_stopped'):return
+            item.pop('refresh_dispatch_pending',None)
+        elif item.get('status')=='operator_stopped':return
+        elif item.get('status')=='complete' or item.get('refresh_dispatch_pending'):
+            if self.refresh_manifest_id is not None and role in LOCAL_REFRESH_SOURCES:
+                self._tick_completed_role(role,entry,item)
+            return
         runtime_path=Path(entry['runtime'])
         # Allow the newly launched wrapper time to create its runtime. The
         # committed launch journal prevents another launch in this window.
@@ -117,6 +126,31 @@ class ContinuationManager:
         if self.clock()<item['next_launch_at']:return
         self._launch(role,entry,item,decision)
 
+    def _tick_completed_role(self,role,entry,item):
+        if entry.get('operator_stop_path') and read_json(entry['operator_stop_path']).get('operator_stop') is True:
+            item.update(status='operator_stopped',requires_user=False,refresh_dispatch_pending=False);return
+        result=self.host.plan_completed_refresh(role,entry,manifest_id=self.refresh_manifest_id,
+            previous=item.get('refresh_planning'),as_of=datetime.fromtimestamp(self.clock(),timezone.utc))
+        status=result['status']
+        if result.get('checkpoint') is not None:item['refresh_planning']=result['checkpoint']
+        item.update(reason='completed_pass_'+status,requires_user=False,coverage_complete=False,
+            original_traversal_proofs=result.get('proofs',item.get('original_traversal_proofs',{})),
+            refresh_dispatch_pending=True)
+        if status!='ready':
+            item['status']={'up_to_date':'waiting_for_publication','planning':'planning_daily_refresh',
+                'original_pass_unconfirmed':'waiting_for_original_pass_proof','existing_owner':'waiting_for_existing_child',
+                'domain_lock_held':'waiting_for_domain_lock','operator_stopped':'operator_stopped',
+                'inventory_unconfirmed':'waiting_for_host_inventory','storage_deferred':'waiting_for_storage'}.get(status,'action_required')
+            item['next_launch_at']=None
+            if status=='operator_stopped':item['refresh_dispatch_pending']=False
+            if item['status']=='action_required':item['requires_user']=True
+            return
+        if not self.host.lock_released(role):item['status']='waiting_for_domain_lock';return
+        if item.get('next_launch_at') is None:
+            item.update(status='waiting_for_continuation',next_launch_at=self.clock()+5);return
+        if self.clock()<item['next_launch_at']:return
+        self._launch(role,entry,item,{'reason':'completed_daily_refresh_ready'})
+
     def _launch(self,role,entry,item,decision):
         p=profile(self.workspace,role,entry)
         name=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-continuous-'+role+'-'+uuid4().hex[:8]
@@ -152,6 +186,7 @@ class ContinuationManager:
                 entry_runtime=new_entry['runtime'],next_launch_at=None,generations=item.get('generations',0)+1,
                 failure_streak=0 if decision['reason'] in {'batch_budget_finished','planned_queue_remaining'} else item.get('failure_streak',0)+1)
             item.pop('auth_probe_ready',None)
+            item.pop('refresh_dispatch_pending',None)
             intent['status']='metadata_registered';atomic_json(run/'continuation-intent.json',intent)
         except Exception as exc:
             item.update(status='action_required',requires_user=True,reason='launch_outcome_requires_review',error_type=type(exc).__name__)

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from .db import transaction
 from .ingestion.models import TargetUniverseManifest
 from .catalog.models import Security,Issuer,CatalogObservation
+from .ops.source_cadence import provider_ready_date, PROJECT_PUBLICATION_GATES
 import re
 
 def restored_mapping(fields,member,observation_id):
@@ -31,22 +32,39 @@ def update_window(as_of,market,*,since=None,lookback_days=14):
         start=min(start,since+timedelta(days=1))
     return start,end
 
-def build_update_jobs(members,issuers,*,manifest_id,original_scope,as_of,enabled_sources=None,since=None,mappings=None):
+def build_update_jobs(members,issuers,*,manifest_id,original_scope,as_of,enabled_sources=None,since=None,mappings=None,
+                      source_since=None,publication_aware=False,max_catchup_days=None):
     enabled=SOURCES if enabled_sources is None else set(enabled_sources)
     if enabled-SOURCES:raise ValueError('Unregistered update source')
     mappings=mappings or {}; jobs=[];total=len(members)
     if not total:raise ValueError('Full target required')
     since=since if since is not None else date.fromisoformat(original_scope['output_end'])
+    if max_catchup_days is not None and (type(max_catchup_days) is not int or not 1<=max_catchup_days<=366):
+        raise ValueError('Bounded refresh catch-up required')
+    source_since=source_since or {}
+    if set(source_since)-SOURCES or any(type(value) is not date for value in source_since.values()):
+        raise ValueError('Exact source catch-up dates required')
+    def window(source,market,lookback):
+        cutoff=source_since.get(source,since)
+        if not publication_aware:return update_window(as_of,market,since=cutoff,lookback_days=lookback)
+        end=provider_ready_date(source,as_of)
+        if cutoff>=end:return None
+        if max_catchup_days is not None:end=min(end,cutoff+timedelta(days=max_catchup_days))
+        while PROJECT_PUBLICATION_GATES[source][2] and end.weekday()>4:end-=timedelta(days=1)
+        if cutoff>=end:return None
+        return min(end-timedelta(days=lookback-1),cutoff+timedelta(days=1)),end
     for member in members:
-        market=member['market'];start,end=update_window(as_of,market,since=since)
+        market=member['market']
         request={'market':market,'symbol':member['symbol'],'manifest_id':manifest_id,'target_count':total,
             'original_backfill_start':original_scope['output_start'],'original_backfill_end':original_scope['output_end'],
-            'output_start':max(date(2016,1,1),start).isoformat(),'output_end':end.isoformat(),
             'refresh_policy':'catchup_and_rolling14_calendar_days_v1'}
         sources=('kis',) if market=='KR' else ('alpaca','kis_overseas')
         for source in sources:
             if source not in enabled:continue
-            specific=dict(request)
+            dates=window(source,market,14)
+            if dates is None:continue
+            start,end=dates
+            specific={**request,'output_start':max(date(2016,1,1),start).isoformat(),'output_end':end.isoformat()}
             if source=='alpaca':specific['page_size']=100
             if source=='kis_overseas':
                 proof=mappings.get(member['security_id'])
@@ -57,7 +75,9 @@ def build_update_jobs(members,issuers,*,manifest_id,original_scope,as_of,enabled
     for issuer in issuers:
         source='opendart' if issuer['market']=='KR' else 'sec'
         if source not in enabled:continue
-        start,end=update_window(as_of,issuer['market'],since=since,lookback_days=90)
+        dates=window(source,issuer['market'],90)
+        if dates is None:continue
+        start,end=dates
         request={'market':issuer['market'],'issuer_id':issuer['id'],'manifest_id':manifest_id,'target_count':total,
             'output_start':original_scope['output_start'],'output_end':end.isoformat(),
             'discovery_start':max(date(1999,1,1),start).isoformat(),'refresh_policy':'new_and_corrected_filings_rolling90_days_v1',
@@ -65,26 +85,33 @@ def build_update_jobs(members,issuers,*,manifest_id,original_scope,as_of,enabled
         jobs.append({'source':source,'domain':'issuer_discovery','entity_id':issuer['id'],'request':request,'priority':1})
     return jobs
 
+def load_update_context(session,target,*,enabled_sources=None):
+    if target is None:raise ValueError('Original manifest missing')
+    members=list(target.members);scope=dict(target.scope)
+    ids={m['security_id'] for m in members}
+    securities=session.scalars(select(Security).where(Security.id.in_(ids))).all()
+    if len(securities)!=len(ids):raise ValueError('Target bootstrap security missing')
+    issuer_ids={s.issuer_id for s in securities if s.issuer_id}
+    issuer_ids.update(m['issuer_id'] for m in members if m.get('issuer_id'))
+    issuers=[{'id':i.id,'market':i.market} for i in session.scalars(select(Issuer).where(Issuer.id.in_(issuer_ids)))]
+    if {i['id'] for i in issuers}!=issuer_ids:raise ValueError('Target issuer identity missing')
+    issuers.sort(key=lambda item:item['id'])
+    identifier_to_id={s.source_identifier:s.id for s in securities};mappings={}
+    member_by_id={m['security_id']:m for m in members}
+    if enabled_sources is None or 'kis_overseas' in enabled_sources:
+        records=session.scalars(select(CatalogObservation).where(CatalogObservation.source=='kis_overseas_master',
+            CatalogObservation.identifier.in_(identifier_to_id)).order_by(CatalogObservation.captured_at.desc()))
+        for observation in records:
+            fields=observation.fields or {}
+            identity=identifier_to_id[observation.identifier]
+            proof=restored_mapping(fields,member_by_id[identity],observation.id)
+            if proof:mappings.setdefault(identity,proof)
+    return members,scope,issuers,mappings
+
+
 def plan_remote_jobs(engine,manifest_id,as_of,*,enabled_sources=None,since=None):
     with transaction(engine) as session:
-        target=session.get(TargetUniverseManifest,manifest_id)
-        if target is None:raise ValueError('Original manifest missing')
-        members=list(target.members);scope=dict(target.scope)
-        ids={m['security_id'] for m in members}
-        securities=session.scalars(select(Security).where(Security.id.in_(ids))).all()
-        if len(securities)!=len(ids):raise ValueError('Target bootstrap security missing')
-        issuer_ids={s.issuer_id for s in securities if s.issuer_id}
-        issuer_ids.update(m['issuer_id'] for m in members if m.get('issuer_id'))
-        issuers=[{'id':i.id,'market':i.market} for i in session.scalars(select(Issuer).where(Issuer.id.in_(issuer_ids)))]
-        identifier_to_id={s.source_identifier:s.id for s in securities};mappings={}
-        member_by_id={m['security_id']:m for m in members}
-        if enabled_sources is None or 'kis_overseas' in enabled_sources:
-            records=session.scalars(select(CatalogObservation).where(CatalogObservation.source=='kis_overseas_master',
-                CatalogObservation.identifier.in_(identifier_to_id)).order_by(CatalogObservation.captured_at.desc()))
-            for observation in records:
-                fields=observation.fields or {}
-                identity=identifier_to_id[observation.identifier]
-                proof=restored_mapping(fields,member_by_id[identity],observation.id)
-                if proof:mappings.setdefault(identity,proof)
+        members,scope,issuers,mappings=load_update_context(session,session.get(TargetUniverseManifest,manifest_id),
+            enabled_sources=enabled_sources)
     return build_update_jobs(members,issuers,manifest_id=manifest_id,original_scope=scope,as_of=as_of,
         enabled_sources=enabled_sources,since=since,mappings=mappings)

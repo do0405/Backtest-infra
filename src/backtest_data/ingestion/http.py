@@ -8,11 +8,10 @@ import time
 from urllib.parse import unquote, urlsplit
 
 import httpx
-from sqlalchemy import update, func
 
 from ..db import transaction, utcnow
 from .jobs import reserve_rate_slot, RateReservationDeferred
-from .models import RateBudget
+from .quota import set_provider_cooldown
 from .krx_contract import KRX_ENDPOINTS
 
 
@@ -34,7 +33,7 @@ class ProviderHTTP:
     def __init__(self, engine, *, client=None, minimum_intervals=None, budget_scope="shared_account"):
         self.engine = engine
         self.client = client or httpx.Client(timeout=30, follow_redirects=False)
-        self.intervals = minimum_intervals or {"sec": 0.25, "opendart": 0.5, "kis": 0.5, "directory": 0.2, "alpaca": 0.31, "krx": 10.0}
+        self.intervals = minimum_intervals or {"sec": 0.25, "opendart": 0.5, "kis": 0.5, "directory": 0.2, "alpaca": 0.334, "krx": 10.0}
         self.budget_scope = budget_scope
 
     def _validate(self, source, method, url):
@@ -88,10 +87,7 @@ class ProviderHTTP:
                                 except (ValueError, TypeError):
                                     pass
                         if retry_delay:
-                            with transaction(self.engine) as session:
-                                session.execute(update(RateBudget).where(RateBudget.key == f"{source}:{self.budget_scope}")
-                                    .values(next_available_at=func.greatest(RateBudget.next_available_at,
-                                                                          utcnow() + timedelta(seconds=retry_delay))))
+                            self.cooldown(source, utcnow() + timedelta(seconds=retry_delay))
                         if retry_delay > 30:
                             raise ProviderError(source, "retry_deferred", retryable=True)
                         if attempt < 2:
@@ -111,6 +107,12 @@ class ProviderHTTP:
                 if attempt == 2:
                     raise ProviderError(source, "transport_failed", retryable=True) from None
                 time.sleep(2 ** attempt)
+
+    def cooldown(self, source, until):
+        if source not in self.intervals:
+            raise ValueError('Unregistered source rate budget')
+        with transaction(self.engine) as session:
+            set_provider_cooldown(session, f'{source}:{self.budget_scope}', until)
 
     def close(self):
         self.client.close()

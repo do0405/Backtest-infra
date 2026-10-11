@@ -39,6 +39,7 @@ def transaction(engine):
 def load_models() -> None:
     from .catalog import models as catalog_models
     from .ingestion import models as ingestion_models
+    from .ingestion import quota_models as quota_models
     from .fundamentals import models as fundamental_models
     from .fundamentals import publication_models as publication_models
     from .fundamentals import daily_publication_models as daily_publication_models

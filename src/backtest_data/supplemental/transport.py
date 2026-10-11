@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit,unquote
 import httpx
 from ..db import transaction,utcnow
-from ..ingestion.jobs import reserve_rate_slot
+from ..ingestion.jobs import reserve_rate_slot, RateReservationDeferred
 from ..ingestion.http import ProviderError,ProviderResponse
 
 LSEG_CATALOG='https://www.lseg.com/content/lseg/en_us/ftse-russell/index-resources/notices/jcr:content/root/container/page_content_region/page-content-region/section/section-fw/index_announcements_.indexannouncement.json'
@@ -15,7 +15,7 @@ HOSTS={'sec':{'www.sec.gov','data.sec.gov'},'directory':{'www.nasdaqtrader.com'}
        'ishares':{'www.ishares.com','www.blackrock.com'},'shinhan':{'open.shinhansec.com'},
        'lseg':{'www.lseg.com'},'spglobal':{'press.spglobal.com'},
        'nasdaq_index':{'ir.nasdaq.com'},'alpaca':{'data.alpaca.markets'},'alpha_vantage':{'www.alphavantage.co'}}
-INTERVALS={'sec':0.25,'alpaca':0.31,'directory':0.2,'alpha_vantage':2.0}
+INTERVALS={'sec':0.25,'alpaca':0.334,'directory':0.2,'alpha_vantage':2.0}
 
 def validate_request(source,method,url):
     p=urlsplit(url)
@@ -43,7 +43,10 @@ class SourceHTTP:
     def fetch(self,source,method,url,*,params=None,json_body=None,headers=None,max_bytes=32*1024*1024):
         validate_request(source,method,url)
         if source=='alpha_vantage' and (params or {}).get('function')!='LISTING_STATUS':raise ValueError('Listing-only Alpha Vantage contract')
-        self._reserve(source)
+        try:
+            self._reserve(source)
+        except RateReservationDeferred:
+            raise ProviderError(source, 'rate_budget_deferred', retryable=True) from None
         try:
             with self.client.stream(method,url,params=params,json=json_body,headers=headers) as response:
                 if response.status_code!=200:raise ProviderError(source,f'HTTP_{response.status_code}')
@@ -68,7 +71,11 @@ class SourceHTTP:
                 cached.update(sha256=digest.hexdigest(),legacy_checksum_recorded=True)
                 receipt.write_text(json.dumps(cached),encoding='utf-8')
             return cached
-        self._reserve(source);path.parent.mkdir(parents=True,exist_ok=True)
+        try:
+            self._reserve(source)
+        except RateReservationDeferred:
+            raise ProviderError(source, 'rate_budget_deferred', retryable=True) from None
+        path.parent.mkdir(parents=True,exist_ok=True)
         pending=path.with_suffix('.partial')
         try:
             with self.client.stream('GET',url,headers=headers) as response:

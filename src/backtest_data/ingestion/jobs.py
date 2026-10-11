@@ -200,7 +200,10 @@ def reserve_rate_slot(session, key: str, now: datetime, minimum_interval: float,
         raise ValueError("Positive source interval required")
     session.execute(insert(RateBudget).values(key=key, next_available_at=now)
                     .on_conflict_do_nothing(index_elements=[RateBudget.key]))
-    budget = session.scalar(select(RateBudget).where(RateBudget.key == key).with_for_update())
+    budget = session.scalar(select(RateBudget).where(RateBudget.key == key).with_for_update()
+        .execution_options(populate_existing=True))
+    from .quota import quota_preflight
+    quota_preflight(session, key, now)
     available = max(now, budget.next_available_at)
     if max_delay_seconds is not None and (available - now).total_seconds() > max_delay_seconds:
         raise RateReservationDeferred("Source budget deferred before reservation")

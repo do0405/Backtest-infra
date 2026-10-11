@@ -9,11 +9,36 @@ from ..catalog.models import Issuer, Security
 from ..db import transaction, utcnow
 from ..ingestion.jobs import plan_job
 from ..ingestion.http import ProviderError
+from ..ingestion.models import CollectionJob
 from .storage import _fence, store_extraction
 from .xbrl import parse_xbrl, parse_xbrl_zip
 
 
 PERIODIC_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A"}
+
+
+def filing_work_request(request):
+    """Accession work is independent of its changing issuer discovery window."""
+    keys={'issuer_id','market','cik','filing','reprt_code','reprt_code_candidates','disclosure_profile'}
+    result={key:value for key,value in request.items() if key in keys}
+    filing_keys={'accessionNumber','filingDate','reportDate','acceptanceDateTime','form','primaryDocument',
+        'rcept_no','rcept_dt','report_nm','corp_code'}
+    result['filing']={key:value for key,value in request['filing'].items() if key in filing_keys}
+    return result
+
+
+def _plan_discovered_filing(session,*,source,accession,request):
+    specification=filing_work_request(request)
+    previous=session.scalars(select(CollectionJob).where(CollectionJob.source==source,
+        CollectionJob.domain=='filing_sql',CollectionJob.entity_id==accession,
+        CollectionJob.request['issuer_id'].astext==request['issuer_id'],CollectionJob.status!='superseded'))
+    # Legacy work carries the original discovery window. Keep its job and
+    # extraction evidence intact when the filing metadata is unchanged.
+    if any(filing_work_request(job.request)==specification for job in previous):return False
+    planned_request={**specification}
+    if request.get('manifest_id'):planned_request['manifest_id']=request['manifest_id']
+    plan_job(session,source=source,domain='filing_sql',entity_id=accession,request=planned_request,priority=1)
+    return True
 
 
 def dart_report_code(title):
@@ -41,6 +66,7 @@ def discover_issuer(engine, *, issuer_id, market, request, dart, sec, fence=None
         _fence(session, fence)
         identifier = issuer.source_identifier
     created = 0
+    reused = 0
     if market == "KR":
         corp_code = identifier.removeprefix("DART:")
         page = 1
@@ -65,9 +91,10 @@ def discover_issuer(engine, *, issuer_id, market, request, dart, sec, fence=None
                              "reprt_code_candidates": ["11013", "11014"] if "분기보고서" in title and code is None else [],
                              "disclosure_profile": "periodic_report"}
                     _fence(session, fence)
-                    plan_job(session, source="opendart", domain="filing_sql", entity_id=filing["rcept_no"], request=child, priority=1)
+                    fresh=_plan_discovered_filing(session,source='opendart',accession=filing['rcept_no'],request=child)
                     _fence(session, fence)
                     created += 1
+                    reused += not fresh
                 _fence(session, fence)
             if page >= int(payload.get("total_page", 1)):
                 break
@@ -97,11 +124,12 @@ def discover_issuer(engine, *, issuer_id, market, request, dart, sec, fence=None
                 child = {**request, "issuer_id": issuer_id, "cik": identifier.removeprefix("CIK"), "filing": filing,
                          "disclosure_profile": "periodic_report"}
                 _fence(session, fence)
-                plan_job(session, source="sec", domain="filing_sql", entity_id=accession, request=child, priority=1)
+                fresh=_plan_discovered_filing(session,source='sec',accession=accession,request=child)
                 _fence(session, fence)
                 created += 1
+                reused += not fresh
             _fence(session, fence)
-    return {"child_filing_jobs": created, "warmup_strategy": "all_available_periodic_filings_before_output_end",
+    return {"child_filing_jobs": created, "reused_filing_jobs": reused, "warmup_strategy": "all_available_periodic_filings_before_output_end",
             "disclosure_profile": "periodic_report"}
 
 

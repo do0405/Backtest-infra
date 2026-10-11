@@ -140,6 +140,8 @@ class OpenDART:
                 code_match = re.search(rb"<status>\s*(\d{3})\s*</status>", response.content[:8192])
                 if code_match:
                     code = code_match.group(1).decode("ascii")
+                    if code == '020' and hasattr(self.http, 'cooldown'):
+                        self.http.cooldown('opendart', utcnow() + timedelta(hours=24))
                     raise ProviderError("opendart", code, retryable=code in {"020", "800", "900"})
                 raise ProviderError("opendart", "expected_zip_unavailable")
             return response
@@ -148,6 +150,8 @@ class OpenDART:
         if code != "000":
             if not re.fullmatch(r"\d{3}", code):
                 code = "invalid_response"
+            if code == '020' and hasattr(self.http, 'cooldown'):
+                self.http.cooldown('opendart', utcnow() + timedelta(hours=24))
             raise ProviderError("opendart", code, retryable=code in {"020", "800", "900"})
         return response, payload
 

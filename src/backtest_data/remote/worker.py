@@ -22,7 +22,7 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
               transport_root, stream_id, sequence, checkpoint=None, budget_seconds=600,
               max_private_bytes=8 * 1024 ** 3, previous_bundle_id=None,
               postprocess=None, postprocess_budget_seconds=60,
-              source_handlers=None,source_handler_budget_seconds=120):
+              source_handlers=None,source_handler_budget_seconds=120,rate_admission=None):
     slots = validate_ownership(ownership)
     if not 0 < budget_seconds <= 14400: raise ValueError("bounded remote execution window required")
     core_slots=[s for s in slots if s['source'] in CORE_SOURCES and s.get('handler')!='supplier_adjusted']
@@ -38,10 +38,19 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
         if 'raw_identity_index' in checkpoint:
             restore_raw_identities(session, checkpoint['raw_identity_index'], authority='new_remote_ephemeral_database')
         restore_tasks(session,checkpoint.get('task_state',[]),owned_sources={s['source'] for s in slots},authority='new_remote_ephemeral_database')
+        from ..ingestion.quota import restore_rate_state
+        rate_binding={'owner_id':ownership['owner_id'],'manifest_id':ownership['manifest_id']}
+        if 'provider_rate_state' in checkpoint:
+            restore_rate_state(session,checkpoint['provider_rate_state'],
+                sources={s['source'] for s in slots},binding=rate_binding)
+        # A remote quota allocation must be externally committed before this
+        # callback can grant its credits. Restored old allocations never suffice.
+        if rate_admission is not None:rate_admission(session)
     # Commit portable queue restoration before dynamic discovery/planning reads.
     # The planner may return new current-day work while old jobs remain pending.
     if callable(planned_jobs):planned_jobs=planned_jobs(checkpoint)
     with transaction(engine) as session:
+        from ..ingestion.quota import snapshot_rate_state
         manifest = session.get(TargetUniverseManifest, ownership.get("manifest_id"))
         if manifest is None or len(manifest.members) != 17758: raise ValueError("whole target bootstrap manifest required")
         scope = {"manifest_id": manifest.id, "target_count": 17758,
@@ -88,6 +97,7 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
         portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
         durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes'}},**postprocess_state,
                               "version": 2, "completed_task_ids": sorted(completed), "task_state":portable,
+                              "provider_rate_state":snapshot_rate_state(session,{s['source'] for s in slots},binding=rate_binding),
                               **({'raw_identity_index':snapshot_raw_identities(session)} if 'raw_identity_index' in checkpoint else {}),
                               "unfinished_task_ids": sorted(j.identity_hash for j in all_owned if j.status not in {'succeeded','superseded'}),
                               "completed_through":refresh_watermarks(all_owned,checkpoint.get('completed_through',{}),owned_sources={s['source'] for s in slots}),

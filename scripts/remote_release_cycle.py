@@ -19,6 +19,10 @@ from backtest_data.remote.worker import run_cycle
 from backtest_data.remote.source_handlers import run_owned_handlers
 from backtest_data.remote.archives import restore
 from backtest_data.remote.identity import validate_raw_identity_index
+from backtest_data.remote.quota import reserve_hosted_allowance,deferred_handler
+from backtest_data.ingestion.quota import (install_quota_controls,upsert_quota_policy,
+    grant_allocation_day_credits,set_provider_cooldown)
+from backtest_data.ingestion.jobs import stable_hash
 
 
 def main():
@@ -62,9 +66,27 @@ def main():
         raise ValueError('original KRX task binding mismatch')
     if checkpoint.get('not_before') and utcnow()<checkpoint['not_before']:
         raise ValueError('prior account budget has not elapsed')
+    # This immutable control commit happens BEFORE provider HTTP. A crashed
+    # hosted runner cannot make its allocated allowance available again.
+    prior_clocks=[]
+    allowance=reserve_hosted_allowance(gh,repo,{
+        'stream_id':stream,'manifest_id':configuration['manifest_id'],
+        'handoff_id':configuration['handoff_id'],'bootstrap_sha256':binding['sha256']},work/'quota',
+        run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
+        budget_seconds=args.budget_seconds,now=utcnow(),target=os.environ['GITHUB_SHA'],
+        record_not_before=prior_clocks.append)
     engine=make_engine(os.environ['BACKTEST_DATABASE_URL'])
     raw=work/'raw'
     try:
+        with transaction(engine) as session:
+            install_quota_controls(session)
+            upsert_quota_policy(session,'krx:shared_account',minimum_interval_seconds=10,
+                window_kind='calendar_day',credit_limit=9500,require_allocation=True)
+        def admit_rate(session):
+            if allowance is not None:
+                grant_allocation_day_credits(session,'krx:shared_account',allowance['credits_by_day'],
+                    binding_hash=stable_hash(allowance))
+            if prior_clocks:set_provider_cooldown(session,'krx:shared_account',max(prior_clocks))
         for bundle in FolderTransport(work/'catalog').committed_bundles():
             with transaction(engine) as session:import_bundle(session,bundle,raw_root=raw)
         store=work/'delta-store';store.mkdir()
@@ -74,7 +96,8 @@ def main():
         result=run_cycle(engine,raw,ownership=configuration,planned_jobs=[],incoming_bundles=[],
             output_root=work/'outgoing',transport_root=store,stream_id=stream,sequence=sequence,
             checkpoint=checkpoint,budget_seconds=args.budget_seconds,max_private_bytes=MAX_ASSET,
-            previous_bundle_id=previous,source_handlers=run_owned_handlers,
+            previous_bundle_id=previous,source_handlers=run_owned_handlers if allowance is not None else deferred_handler,
+            rate_admission=admit_rate,
             source_handler_budget_seconds=args.budget_seconds,postprocess=None)
         head=result['head'];last=store/'bundles'/head['bundle_id']
         state=loads(json.dumps(read_manifest(last)['checkpoint']))
