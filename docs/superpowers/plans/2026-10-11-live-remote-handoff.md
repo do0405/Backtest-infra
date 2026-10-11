@@ -39,8 +39,12 @@ Steps:
       preserve all other running workers and online index builds.
 - [x] Publish bootstrap and ownership Secret; execute short real remote run,
       verify original scope/checkpoints and new official response evidence.
-- [ ] Verify actual local SQL rows/capture clocks, idempotent replay, automatic
-      second sync cycle and schedule admission. Enable continuous refresh.
+- [x] Verify actual automatic local SQL rows/capture clocks and zero-insert
+      committed replay. The first bundle contains4,972KRX observations and
+      5,014 total new rows. Hosted scheduling and singleton local polling are
+      enabled; later bundles continue automatically.
+- [ ] Finish the separate full-generation verification of both published runs;
+      do not report24,047cloud observations as all committed locally.
 - [ ] Expand explicitly fenced account groups only when identity/task closure
       is verified; record each connected source and external access gaps.
 - [x] Finish approved research report/export improvements and actual browser
@@ -57,5 +61,7 @@ sync task. First hosted attempt found a missing pypdf runtime dependency before
 acquisition; the fixed run 38115965869 completed and published 10,074 KRX
 observations and 28 captures. Run 38116683206 verifies continuation from its
 checkpoint. Production SQL import is being verified by the actual automatic
-importer, including a tested Windows download path-length correction. Other
+importer, including a tested Windows download path-length correction. The first
+committed bundle and exact original samples/replay were verified in production
+at07:43:36UTC; full-generation imports remain in progress. Other
 provider accounts remain locally owned; this is a staged source handoff.

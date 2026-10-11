@@ -42,3 +42,11 @@ The final report/API/actual-framework subset passed 33 checks. A separate
 nonfinite-float/Calmar counterexample is covered, in addition to HTTP200 for the
 valid high-growth benchmark and the initial-anchor distinction. The actual saved
 Samsung result again produced HTTP200 and the same original Backtrader replay ID.
+
+The parent then verified the actual loopback server and browser. The existing
+result retained its exact original bytes and same-input replay identifier. All
+six download endpoints returnedHTTP200, with27decision rows,3fills and1closed
+portion. The real browser showed report/benchmark controls, the ledger and all
+six downloads. `artifacts/research-platform/live-followup-verification.json`
+and `live-analysis-proof.png` preserve the production evidence; these ignored
+operational artifacts are not substituted demo data in the public source.

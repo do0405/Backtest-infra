@@ -123,13 +123,44 @@ published predecessor hashes were verified across both generations. The second
 generation advanced 28 tasks from its saved checkpoint. These rows do not
 establish whole-period completion.
 
+Production automatic SQL verification at 2026-10-11T07:43:36Z confirmed the first
+committed bundle: 4,972 KRX observations, 28 capture attempts, 17 raw identities
+and eight source contracts, totaling 5,014 newly inserted rows. Five original
+rows from each of the four tables matched exactly, including identifiers and
+source clocks. Replaying that same committed bundle inserted zero rows while
+the later bundle continued importing. The remaining observations from the two
+published generations are still handled by the single automatic importer;
+24,047 cloud-published observations are not all claimed as locally committed.
+The production receipt is `production-prefix-verification.json` under the
+ignored activation artifact directory. Existing source data and checkpoints
+were not deleted or reset.
+
 Manifest hash, structural and typed/private-state checks read one identical byte
 snapshot. SQL replay fetches only the existing receipt ID/hash, avoiding transfer
 of a potentially large saved queue checkpoint. Source validation, exact-row
 comparison and rollback rules remain in force.
+After bundle bytes/hash validation, an existing immutable ID/hash receipt returns
+zero inserted rows without waiting behind a later generation's stream lock.
+New bundles retain the exclusive lock and check the receipt again after acquiring
+it, preserving concurrent import admission and atomic source/receipt commits.
 
 KRX quotes are additive evidence. NAV, IV and index values do not establish
 complete product history, exact VWAP or historical index constituents. Successful
 runs and queue completion differ from whole-period clean completion. SEC/OpenDART,
 KIS, Alpaca raw, split prices, VWAP and supplemental collectors remain local in
 this first deployment; their credentials are not exposed to the KRX workflow.
+
+## Remaining account handoff requirements
+
+Account ownership is indivisible when collectors share provider quotas. Available
+Secrets and portable task cursors do not satisfy source identity restoration.
+
+| Account group | Preserved local operation | Required before its remote admission |
+| --- | --- | --- |
+| KIS domestic and overseas raw | One local prices role and original page checkpoints | Transfer the current-task price/revision/decision parent closure, and share token issuance/cooldown across both sources rather than constructing two independent account clients. |
+| Alpaca raw, split prices, VWAP and supplemental actions/trades | Separate local roles share the same provider account | Restore their exact state and shared-call budget together; add the dedicated full VWAP handler before moving the account. |
+| SEC/OpenDART financial discovery and documents | Original local filing/source-document/fact and public metadata history | Preserve every existing filing/document/fact UUID and revision/publication parent. Raw metadata alone cannot recreate the original financial identity. |
+| Supplemental holdings/listing sources | Existing approved local collector and source stage | Transfer existing documents/raw bytes, partial N-PORT inventories and the Alpha Vantage rolling-24-hour ledger. A document ID in a progress file alone is insufficient in a fresh database. |
+
+These are implementation/identity-closure prerequisites, not requests to purchase
+new access. No account is moved by editing an ownership JSON field alone.

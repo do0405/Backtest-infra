@@ -180,13 +180,24 @@ def import_bundle(session, bundle, *, imported_at=None, expected_manifest_hash=N
     manifest_hash = digest(Path(bundle) / "manifest.json")
     records = list(iter_bundle_rows(bundle, expected_manifest_hash=manifest_hash))
     registry = tables()
-    with session.begin_nested():
-        session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:stream))"), {"stream": "remote-import:" + manifest["stream_id"]})
+    def confirmed_replay():
         receipt = session.execute(select(RemoteImportReceipt.bundle_id, RemoteImportReceipt.manifest_hash)
             .where(RemoteImportReceipt.bundle_id == manifest["bundle_id"])).one_or_none()
         if receipt is not None:
             if receipt.manifest_hash != manifest_hash: raise ValueError("replayed bundle manifest hash changed")
             return {"bundle_id": receipt.bundle_id, "inserted_rows": 0, "replayed": True}
+        return None
+    # An immutable, transactionally committed receipt proves a no-op replay.
+    # It must not wait behind another generation's unrelated source INSERTs.
+    # New bundles still take the stream lock and repeat the receipt check there.
+    replayed = confirmed_replay()
+    if replayed is not None:
+        return replayed
+    with session.begin_nested():
+        session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:stream))"), {"stream": "remote-import:" + manifest["stream_id"]})
+        replayed = confirmed_replay()
+        if replayed is not None:
+            return replayed
         collision = session.scalar(select(RemoteImportReceipt.bundle_id).where(RemoteImportReceipt.stream_id == manifest["stream_id"], RemoteImportReceipt.sequence == manifest["sequence"]))
         if collision is not None: raise ValueError("independent stream sequence collision")
         _install_raw(bundle, manifest, records, raw_root)

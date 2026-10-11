@@ -71,6 +71,11 @@ Eligibility code/CLI and isolated PostgreSQL semantics passed 34 checks. Actual 
 
 Research API/framework/projection targeted validation passed 51 checks. The actual Samsung source sample contains 24 bars over 27 provisional weekday sessions, 27 selection traces and three framework fills. Browser restoration, date-specific evidence, real candles and same-input replay were verified. US live series lookup hit confirmed statement timeout and has no substitute fixture. Frontend independent spec and correctness/security reviews approved the restored-state fix.
 
-All eight provider Secrets were registered; remote ownership remains disabled. Public source publication and actual Actions result are recorded separately after final frontend build verification.
+All eight provider Secrets were registered. The later identity-bound KRX handoff
+activated only that account, with two actual hosted generations and immutable
+checkpoint/predecessor verification. Other provider accounts remain local.
+Production automatic SQL import is being checked separately; a cloud Release
+publication is not proof of local SQL completion. See the live handoff plan and
+`docs/data/remote-pipeline.md` for the current deployment contract.
 
 Public snapshot 7616056ae258c4d702d220b2dcc66e841a7dde11 was pushed to do0405/Backtest-infra with no prior local Git history and no matched current credentials. GitHub manual run38111318058 passed88Python/SQL/framework checks,12frontend checks/build and all eight Secret presence booleans; no provider requests or remote source ownership change occurred. A later browser-only chart auto-size issue is separately fixed and must be reflected in the final frontend build/commit verification.

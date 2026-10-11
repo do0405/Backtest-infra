@@ -41,12 +41,14 @@ def test_import_preserves_clock_and_precision_and_replay_inserts_zero(db_session
     from sqlalchemy import event
     statements=[]
     def record(connection,cursor,statement,parameters,context,executemany):
-        if 'FROM remote_import_receipt' in statement:statements.append(statement)
+        statements.append(statement)
     event.listen(db_session.bind,'before_cursor_execute',record)
     db_session.expire_all()
     second = import_bundle(db_session, path)
     event.remove(db_session.bind,'before_cursor_execute',record)
-    assert statements and all('remote_import_receipt.checkpoint' not in sql for sql in statements)
+    receipt_reads=[sql for sql in statements if 'FROM remote_import_receipt' in sql]
+    assert receipt_reads and all('remote_import_receipt.checkpoint' not in sql for sql in receipt_reads)
+    assert not any('pg_advisory_xact_lock' in sql for sql in statements)
     assert first['inserted_rows'] == 3
     assert second['inserted_rows'] == 0
     observed = db_session.get(SupplementalObservation, o['id'])
