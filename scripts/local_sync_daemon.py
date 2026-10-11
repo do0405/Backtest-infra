@@ -51,7 +51,9 @@ def sync_once(engine,gh,configuration,root,state):
         completed=state.get('completed_releases',{})
         tag=release['tag_name']
         if tag in completed:continue
-        run=Path(root)/'downloads'/f'{tag}-{uuid4().hex[:10]}'
+        # Keep immutable raw blob paths below the Windows MAX_PATH limit.
+        # The full public tag remains bound by commit.json and the SQL receipt.
+        run=Path(root)/'downloads'/uuid4().hex[:10]
         commit_path=download_asset(gh,repo,release,'commit.json',run,max_bytes=1024**2)
         commit=read_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'],tag=tag)
         if commit['start_sequence']!=state.get('end_sequence',0)+1 or commit['previous_tag']!=state.get('last_tag') or commit['previous_commit_sha256']!=state.get('last_commit_sha256'):

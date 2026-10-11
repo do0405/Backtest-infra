@@ -32,20 +32,30 @@ On restart SQL receipts allow zero-insert replay. The local importer never claim
 or resets source jobs, leases or checkpoints.
 
 Steps:
-- [ ] Test bounded bulk FK export and exact raw identity restore.
-- [ ] Implement Release checkpoint/delta transport, trusted scheduled workflow,
+- [x] Test bounded bulk FK export and exact raw identity restore.
+- [x] Implement Release checkpoint/delta transport, trusted scheduled workflow,
       singleton sync and source handoff gate. Review source/secret publication.
-- [ ] Freeze original KRX state after identity-bound quiesce and manager fence;
+- [x] Freeze original KRX state after identity-bound quiesce and manager fence;
       preserve all other running workers and online index builds.
-- [ ] Publish bootstrap and ownership Secret; execute short real remote run,
+- [x] Publish bootstrap and ownership Secret; execute short real remote run,
       verify original scope/checkpoints and new official response evidence.
 - [ ] Verify actual local SQL rows/capture clocks, idempotent replay, automatic
       second sync cycle and schedule admission. Enable continuous refresh.
 - [ ] Expand explicitly fenced account groups only when identity/task closure
       is verified; record each connected source and external access gaps.
-- [ ] Finish approved research report/export improvements and actual browser
+- [x] Finish approved research report/export improvements and actual browser
       checks; do not count engine tests or partial source samples as full clean.
 
 No extra design approval is needed: this executes the user's approved remote PRD
 and latest explicit activation request. Direct parent owns remote/operation files;
 two bounded native agents own raw identity integration and research followup.
+
+Verified 2026-10-11: original 39,330 KRX jobs / 114,296 raw identities,
+22 catalog chunks, hash-verified bootstrap Release, fenced local KRX owner,
+registered ownership Secret, two-hour hosted schedule and a singleton login
+sync task. First hosted attempt found a missing pypdf runtime dependency before
+acquisition; the fixed run 38115965869 completed and published 10,074 KRX
+observations and 28 captures. Run 38116683206 verifies continuation from its
+checkpoint. Production SQL import is being verified by the actual automatic
+importer, including a tested Windows download path-length correction. Other
+provider accounts remain locally owned; this is a staged source handoff.
