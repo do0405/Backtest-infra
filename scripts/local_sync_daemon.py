@@ -31,6 +31,18 @@ def lock_file(path):
     return file
 
 
+def configure_github(configuration):
+    """Bind the already-authorized CLI config across Windows app namespaces."""
+    value=configuration.get('github_config_directory')
+    if value is None:return
+    path=Path(value)
+    if not path.is_absolute() or not path.is_dir():
+        raise ValueError('existing_github_configuration_required')
+    # Only the directory is passed to the official CLI; credentials are never
+    # copied, read into this process, printed or included in transfer data.
+    os.environ['GH_CONFIG_DIR']=str(path)
+
+
 def sync_once(engine,gh,configuration,root,state):
     repo=configuration['repository'];stream=configuration['owner_id'];binding=configuration['bootstrap']
     if shutil.disk_usage(root).free<50*1024**3:raise RuntimeError('storage_space_required')
@@ -59,6 +71,8 @@ def sync_once(engine,gh,configuration,root,state):
             source_status=commit['source_status'],inserted_rows=state.get('inserted_rows',0)+result['inserted_rows'])
         atomic_json(Path(root)/'progress.json',state)
     actionable=any(v['requires_user'] for v in state.get('source_status',[]))
+    for field in ('error_type','sqlstate'):
+        state.pop(field,None)
     state.update(checked_at=utcnow().isoformat(),status='source_action_required' if actionable else 'watching_committed_releases',requires_user=actionable,
         repository=repo,stream_id=stream,coverage_complete=False)
     atomic_json(Path(root)/'progress.json',state)
@@ -84,6 +98,7 @@ def main():
             try:
                 from backtest_data.ops.continuation_manager import read_json
                 config=read_json(args.configuration)
+                configure_github(config)
                 sync_once(engine,gh,config,root,state)
             except Exception as exc:
                 sqlstate=getattr(getattr(exc,'orig',None),'sqlstate',None)
