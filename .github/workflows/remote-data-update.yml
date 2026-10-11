@@ -1,4 +1,5 @@
 name: Remote data update
+run-name: KRX checkpoint continuation ${{ inputs.continuation_request_id || github.run_number }}
 on:
   workflow_dispatch:
     inputs:
@@ -6,8 +7,12 @@ on:
         description: Bounded collection batch; next run resumes its checkpoint
         required: false
         default: '6000'
+      continuation_request_id:
+        description: Durable invocation receipt; does not change source ownership or checkpoints
+        required: false
+        default: ''
   schedule:
-    - cron: '37 */2 * * *'
+    - cron: '39 */2 * * *'
 permissions:
   contents: write
   actions: read
