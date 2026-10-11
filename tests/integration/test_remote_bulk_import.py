@@ -32,7 +32,14 @@ def test_large_shared_parent_group_preserves_values_and_rolls_back_natural_key_c
  assert lookup_sizes and max(lookup_sizes)<=100
  fresh=[{'table':'issuer','values':{**rows[0]['values'],'id':str(uuid.uuid4()),'source_identifier':uuid.uuid4().hex,'name':'New original '+str(i)}} for i in range(205)]
  new=write_bundle(tmp_path/'new',fresh,stream_id='new-bulk-'+uuid.uuid4().hex,sequence=1,scope=scope,created_at=now)
- assert import_bundle(db_session,new)['inserted_rows']==205
+ insert_sizes=[]
+ def measure_inserts(connection,cursor,statement,parameters,context,executemany):
+  if statement.startswith('INSERT INTO issuer '):
+   insert_sizes.append(sum(key.startswith('id_m') for key in parameters))
+ event.listen(db_session.bind,'before_cursor_execute',measure_inserts)
+ try:assert import_bundle(db_session,new)['inserted_rows']==205
+ finally:event.remove(db_session.bind,'before_cursor_execute',measure_inserts)
+ assert insert_sizes and all(0<size<=10 for size in insert_sizes)
  assert all(db_session.get(Issuer,row['values']['id']).name==row['values']['name'] for row in fresh)
  conflict={**rows[0],'values':{**rows[0]['values'],'id':str(uuid.uuid4())}}
  additions=[{'table':'issuer','values':{**rows[1]['values'],'id':str(uuid.uuid4()),'source_identifier':uuid.uuid4().hex}} for _ in range(204)]

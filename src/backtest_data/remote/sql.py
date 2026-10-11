@@ -229,8 +229,11 @@ def import_bundle(session, bundle, *, imported_at=None, expected_manifest_hash=N
                 if key not in existing:by_table.setdefault(key[0],[]).append(pending[key])
             for name,rows in by_table.items():
                 table=registry[name];primary=list(table.primary_key.columns)[0]
-                for offset in range(0,len(rows),100):
-                    batch=rows[offset:offset+100]
+                # External-disk WAL/index waits must fit the per-statement
+                # deadline. Keep the bundle transaction atomic while limiting
+                # each physical INSERT to ten original rows.
+                for offset in range(0,len(rows),10):
+                    batch=rows[offset:offset+10]
                     identities=list(session.scalars(insert(table).values([database_values(row) for row in batch]).on_conflict_do_nothing().returning(primary)))
                     if len(identities)!=len(batch):raise ValueError('source stable ID conflicts with existing natural key')
                     inserted+=len(identities)

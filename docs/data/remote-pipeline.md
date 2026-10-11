@@ -65,7 +65,7 @@ availability and validation clocks differ from local import time. Transport does
 not promote PIT eligibility.
 
 Export reads parent identities in bounded groups. Import validates existing rows
-and inserts dependency waves in batches of at most 100 rows. A changed existing
+and inserts dependency waves in batches of at most 10 rows. A changed existing
 value, natural-key collision, missing parent or stream collision rolls back the
 whole bundle savepoint. Immutable receipts and stream cursors commit with source
 rows. Replaying an imported bundle adds zero rows.
