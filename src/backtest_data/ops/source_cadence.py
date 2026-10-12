@@ -6,6 +6,7 @@ KRX keeps calendar-day requests; price lanes use weekdays, without claiming a
 qualified exchange holiday calendar. Filing discovery keeps calendar dates.
 """
 from datetime import date, datetime, timedelta
+import re
 from zoneinfo import ZoneInfo
 
 
@@ -20,6 +21,30 @@ PROJECT_PUBLICATION_GATES = {
 LOCAL_REFRESH_SOURCES = {'prices': ('kis', 'kis_overseas'),
     'alpaca_prices': ('alpaca',), 'fundamentals': ('opendart', 'sec')}
 TRAVERSED = frozenset({'succeeded', 'unsupported'})
+
+
+def local_refresh_sources(role, *, ownership=None, manifest_id=None, previous=None):
+    """Fence new forward plans only; existing queues and frozen plans keep owners."""
+    if role not in LOCAL_REFRESH_SOURCES:
+        raise ValueError('role has no local refresh authority')
+    sources = LOCAL_REFRESH_SOURCES[role]
+    if ownership is None:
+        return sources
+    if (not isinstance(ownership, dict) or ownership.get('version') != 1
+            or not manifest_id or ownership.get('manifest_id') != manifest_id
+            or ownership.get('output_start') != '2016-01-01'
+            or ownership.get('output_end') != '2026-10-07'
+            or ownership.get('forward_stream_id') != 'core-forward-v1'
+            or not isinstance(ownership.get('catalog_sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', ownership['catalog_sha256'])
+            or ownership.get('forward_sources') != ['alpaca', 'sec', 'opendart']):
+        raise ValueError('source ownership binding mismatch')
+    if previous is not None and previous.get('status') == 'planning':
+        frozen = previous.get('sources')
+        if frozen != sorted(sources):
+            raise ValueError('frozen ownership planning sources mismatch')
+        return sources
+    return tuple(source for source in sources if source not in ownership['forward_sources'])
 
 
 def provider_ready_date(source, as_of):

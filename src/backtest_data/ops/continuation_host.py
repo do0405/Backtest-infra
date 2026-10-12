@@ -8,7 +8,7 @@ import sys
 
 from .continuation_manager import atomic_json,read_json
 from .continuation_profiles import SOURCES,DOMAINS,profile
-from .source_cadence import LOCAL_REFRESH_SOURCES,TRAVERSED,_root_scope,prepare_refresh_plan
+from .source_cadence import LOCAL_REFRESH_SOURCES,TRAVERSED,_root_scope,prepare_refresh_plan,local_refresh_sources
 
 
 class WindowsHost:
@@ -138,6 +138,15 @@ class WindowsHost:
                 handle.seek(0);msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
 
     def _plan_completed_refresh_locked(self,role,manifest_id,previous,as_of):
+        policy_path=self.workspace/'artifacts/source-ownership.json'
+        ownership=read_json(policy_path) if policy_path.exists() else None
+        sources=local_refresh_sources(role,ownership=ownership,manifest_id=manifest_id,previous=previous)
+        if not sources:
+            # Completed wrapper receipts can precede queued continuations.
+            # Drain already planned work even after new refresh admission moves.
+            pending=self.runnable(role)
+            status='ready' if pending is True else 'remote_owned' if pending is False else 'queue_state_unconfirmed'
+            return {'status':status,'checkpoint':previous,'coverage_complete':False}
         from sqlalchemy import create_engine,select,text,func
         from backtest_data.config import Settings
         from backtest_data.db import transaction
@@ -146,7 +155,6 @@ class WindowsHost:
         from backtest_data.remote.source_handlers import full_manifest_scope
         from backtest_data.remote_updates import load_update_context
         if self.engine is None:self.engine=create_engine(Settings.from_env().database_url,connect_args={'connect_timeout':5})
-        sources=LOCAL_REFRESH_SOURCES[role]
         with transaction(self.engine) as session:
             session.execute(text("SET LOCAL statement_timeout='10s'"));session.execute(text("SET LOCAL lock_timeout='2s'"))
             target=session.get(TargetUniverseManifest,manifest_id);full_manifest_scope(target)

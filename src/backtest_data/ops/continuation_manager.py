@@ -32,6 +32,16 @@ def atomic_json(path,value):
             time.sleep(.05*(attempt+1))
 
 
+def registration_admitted(path, *, run_id, manager_pid):
+    """A new controller cannot mutate workers before its metadata is registered."""
+    path=Path(path)
+    if not path.exists():return False
+    receipt=read_json(path)
+    if receipt.get('run_id')!=run_id or receipt.get('manager_pid')!=manager_pid:
+        raise ValueError('manager registration identity mismatch')
+    return True
+
+
 class ContinuationManager:
     def __init__(self,workspace,root,host,*,roles=ROLES,clock=time.time,refresh_manifest_id=None):
         self.workspace=Path(workspace);self.root=Path(root);self.host=host;self.roles=tuple(roles);self.clock=clock
@@ -140,7 +150,9 @@ class ContinuationManager:
             item['status']={'up_to_date':'waiting_for_publication','planning':'planning_daily_refresh',
                 'original_pass_unconfirmed':'waiting_for_original_pass_proof','existing_owner':'waiting_for_existing_child',
                 'domain_lock_held':'waiting_for_domain_lock','operator_stopped':'operator_stopped',
-                'inventory_unconfirmed':'waiting_for_host_inventory','storage_deferred':'waiting_for_storage'}.get(status,'action_required')
+                'inventory_unconfirmed':'waiting_for_host_inventory','storage_deferred':'waiting_for_storage',
+                'remote_owned':'waiting_for_remote_refresh',
+                'queue_state_unconfirmed':'queue_state_unconfirmed'}.get(status,'action_required')
             item['next_launch_at']=None
             if status=='operator_stopped':item['refresh_dispatch_pending']=False
             if item['status']=='action_required':item['requires_user']=True
