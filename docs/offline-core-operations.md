@@ -14,8 +14,14 @@ Local login synchronization validates catalog, hashes and the release chain, the
 
 Local SQL import and remote provider health are reported separately. A hash-bound snapshot identifies provider authentication or policy failures requiring action even during old-release catch-up; capacity and network deferrals remain visible as retry status. Large offline backlogs can take time to import while existing collectors use the same local disk.
 
+During replay, progress is written before each release and after every hundred committed captures. It records the current process identity and SQL counters. Provider health remains pending until the bound checkpoint is verified, and any final provider attention state remains visible.
+
 The workflow uses standard public-repository hosted runners with a two-hour job bound, a ninety-minute acquisition budget and export margin. Source budgets reserve separate local and hosted slices before acquisition. OpenDART reservations remain charged conservatively for twenty-six hours, including failed runs. No paid runner or paid storage service is configured.
 
 Service limits still apply. GitHub may delay or drop scheduled runs, public scheduled workflows can be disabled after sixty days without repository activity, and release assets must remain below platform limits. The application splits assets at 512 MiB and updates a useful committed source index after successful capture publication. It has no fixed thirty-day or ninety-day retention limit, but cannot promise unlimited capacity or a scheduler availability guarantee. Re-enabling a disabled workflow resumes from its last committed checkpoint.
 
 Operations require `OFFLINE_CORE_ENABLED` and `OFFLINE_QUOTA_PARTITIONS_READY` repository variables, provider secrets, and private `OFFLINE_CORE_CONFIGURATION` binding catalog/runtime tags and hashes. Runtime upgrades publish a new immutable runtime release and update that configuration only after verification.
+
+Deployment acceptance on 2026-10-12 used `offline-core-runtime-v4-20261012`, SHA-256 `3adc0d6af6c9b021da7d61421418b141abbfbf0e4f6f4bf45305c4e92b484fe7`. Four actual hosted runs committed 7,113 captures. A hash-verified hosted SEC capture stored 283 numeric source facts in local SQL and added zero rows on repeated application. The focused suite passed 168 unit tests and 12 isolated PostgreSQL tests. Existing KRX scheduled execution was observed; the new independent cron is configured and active, with its own schedule event not yet observed at acceptance. Whole-release local catch-up and full data coverage remain separate from deployment acceptance.
+
+Platform contracts: [scheduled workflow behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule), [Release limits](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases), and [Actions limits](https://docs.github.com/en/actions/reference/limits).
