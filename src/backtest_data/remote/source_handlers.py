@@ -198,13 +198,14 @@ def _krx_request_watermark(jobs,since,completed):
     return result
 
 
-def krx_quote_step(engine,raw_root,*,scope,previous,budget_seconds,as_of,completed_through=None,**_):
-    _budget(budget_seconds);started=time.monotonic()
+def krx_quote_step(engine,raw_root,*,scope,previous,budget_seconds,as_of,completed_through=None,deadline=None,**_):
+    _budget(budget_seconds);local_deadline=time.monotonic()+budget_seconds
+    deadline=min(local_deadline,deadline) if deadline is not None else local_deadline
     original_complete=_krx_original_complete(engine,scope,previous)
     window=krx_plan_window(scope,as_of=as_of,prior=previous,completed_through=completed_through,original_complete=original_complete)
     state=copy.deepcopy(previous or {'scope':scope,'planned_through':None})
     planned=None
-    if window['start'] is not None:
+    if window['start'] is not None and time.monotonic()<deadline:
         with transaction(engine) as session:
             manifest=session.get(TargetUniverseManifest,scope['manifest_id'])
             if full_manifest_scope(manifest)!=scope:raise ValueError('source manifest changed during planning')
@@ -213,7 +214,7 @@ def krx_quote_step(engine,raw_root,*,scope,previous,budget_seconds,as_of,complet
         state['planned_through']=window['end'].isoformat()
     refresh_plans=[]
     for refresh in window['refresh_windows']:
-        if time.monotonic()-started>=budget_seconds:break
+        if time.monotonic()>=deadline:break
         with transaction(engine) as session:
             manifest=session.get(TargetUniverseManifest,scope['manifest_id'])
             if full_manifest_scope(manifest)!=scope:raise ValueError('source manifest changed during refresh')
@@ -222,8 +223,8 @@ def krx_quote_step(engine,raw_root,*,scope,previous,budget_seconds,as_of,complet
         if refresh['kind']=='catchup':state['refresh_planned_through']=refresh['end'].isoformat()
     if len(refresh_plans)==len(window['refresh_windows']) and refresh_plans:
         state['last_refresh_ready_date']=window['provider_ready_date'].isoformat()
-    remaining=budget_seconds-(time.monotonic()-started)
-    summary=run_krx_quote_collection(engine,raw_root,budget_seconds=remaining,services=KRX_SERVICES) if remaining>0 else {'status':'budget_deferred'}
+    remaining=deadline-time.monotonic()
+    summary=run_krx_quote_collection(engine,raw_root,budget_seconds=remaining,services=KRX_SERVICES,deadline=deadline) if remaining>0 else {'status':'budget_deferred'}
     since=window['refresh_requests_completed_through']
     with transaction(engine) as session:
         jobs=session.scalars(select(CollectionJob).where(CollectionJob.source=='krx',CollectionJob.domain=='market_quotes',
@@ -540,9 +541,11 @@ def _owned_handler_specs(slots,owned_sources):
 
 
 def run_owned_handlers(engine,raw_root,*,manifest_id,slots,owned_sources,checkpoint,budget_seconds,work_root,
-                       authority=AUTHORITY,as_of=None):
+                       authority=AUTHORITY,as_of=None,deadline=None):
     """Worker hook returning only safe state and bounded explicit outcomes."""
     _authority(authority);_budget(budget_seconds)
+    local_deadline=time.monotonic()+budget_seconds
+    deadline=min(local_deadline,deadline) if deadline is not None else local_deadline
     specs=_owned_handler_specs(slots,set(owned_sources))
     previous=checkpoint.get('source_handler_state',{})
     if not isinstance(previous,dict) or set(previous)-HANDLERS:raise ValueError('unknown source handler checkpoint')
@@ -552,7 +555,7 @@ def run_owned_handlers(engine,raw_root,*,manifest_id,slots,owned_sources,checkpo
         scope=full_manifest_scope(session.get(TargetUniverseManifest,manifest_id))
     for value in previous.values():_binding(value,scope)
     as_of=_aware(as_of or utcnow())
-    deadline=time.monotonic()+budget_seconds;state=copy.deepcopy(previous);outcomes=[]
+    state=copy.deepcopy(previous);outcomes=[]
     for position,(name,slot) in enumerate(specs):
         if name in state:_binding(state[name],scope)
         remaining=deadline-time.monotonic()
@@ -563,6 +566,7 @@ def run_owned_handlers(engine,raw_root,*,manifest_id,slots,owned_sources,checkpo
         try:
             updated,outcome=function(engine,raw_root,scope=scope,previous=state.get(name),budget_seconds=share,
                 as_of=as_of,work_root=work_root,authority=authority,adjustment=slot.get('adjustment','split'),
+                deadline=deadline,
                 completed_through=checkpoint.get('completed_through',{}).get('krx'))
             dumps(updated);dumps(outcome)
         except Exception as exc:

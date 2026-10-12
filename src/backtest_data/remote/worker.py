@@ -2,6 +2,7 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import time
 from sqlalchemy import select
@@ -22,16 +23,24 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
               transport_root, stream_id, sequence, checkpoint=None, budget_seconds=600,
               max_private_bytes=8 * 1024 ** 3, previous_bundle_id=None,
               postprocess=None, postprocess_budget_seconds=60,
-              source_handlers=None,source_handler_budget_seconds=120,rate_admission=None):
+              source_handlers=None,source_handler_budget_seconds=120,rate_admission=None,
+              acquisition_deadline=None,phase_callback=None):
     slots = validate_ownership(ownership)
-    if not 0 < budget_seconds <= 14400: raise ValueError("bounded remote execution window required")
+    if not 0 <= budget_seconds <= 14400 or budget_seconds==0 and acquisition_deadline is None:
+        raise ValueError("bounded remote execution window required")
+    if acquisition_deadline is not None and not math.isfinite(acquisition_deadline):
+        raise ValueError('finite acquisition deadline required')
+    def phase(name):
+        if phase_callback is not None:phase_callback(name)
     core_slots=[s for s in slots if s['source'] in CORE_SOURCES and s.get('handler')!='supplier_adjusted']
     reserved_post=min(postprocess_budget_seconds,budget_seconds/5) if postprocess else 0
     handler_ceiling=budget_seconds/3 if core_slots else budget_seconds-reserved_post
     reserved_handlers=min(source_handler_budget_seconds,handler_ceiling) if source_handlers else 0
     if reserved_post<0 or reserved_handlers<0:raise ValueError('bounded processing reservation required')
     deadline = time.monotonic() + budget_seconds; checkpoint = dict(checkpoint or {})
+    if acquisition_deadline is not None:deadline=min(deadline,acquisition_deadline)
     completed = set(checkpoint.get("completed_task_ids", [])); registry = tables()
+    phase('operational_restore_started')
     for path in incoming_bundles:
         with transaction(engine) as session: import_bundle(session, path, raw_root=raw_root)
     with transaction(engine) as session:
@@ -46,6 +55,7 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
         # A remote quota allocation must be externally committed before this
         # callback can grant its credits. Restored old allocations never suffice.
         if rate_admission is not None:rate_admission(session)
+    phase('operational_restored')
     # Commit portable queue restoration before dynamic discovery/planning reads.
     # The planner may return new current-day work while old jobs remain pending.
     if callable(planned_jobs):planned_jobs=planned_jobs(checkpoint)
@@ -67,6 +77,7 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
             job = plan_job(session, source=spec["source"], domain=spec["domain"], entity_id=spec["entity_id"], request=spec["request"], priority=spec.get("priority",10))
             task_jobs[identity] = job.id
     outcomes = []
+    phase('acquisition_started')
     from ..ingestion.supervisor import run_collection
     for position,slot in enumerate(core_slots):
         remaining = (deadline - time.monotonic() - reserved_post - reserved_handlers)/(len(core_slots)-position)
@@ -78,7 +89,8 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
         postprocess_state=source_handlers(engine,raw_root,manifest_id=scope['manifest_id'],slots=slots,
             owned_sources={s['source'] for s in slots},checkpoint=checkpoint,
             budget_seconds=min(reserved_handlers,deadline-time.monotonic()-reserved_post),work_root=output_root,
-            authority='new_remote_ephemeral_database')
+            authority='new_remote_ephemeral_database',
+            **({'deadline':deadline-reserved_post} if acquisition_deadline is not None else {}))
         if not isinstance(postprocess_state,dict):raise ValueError('safe handler checkpoint mapping required')
         dumps(postprocess_state)
     if postprocess and deadline>time.monotonic():
@@ -87,6 +99,8 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
         if not isinstance(next_state,dict):raise ValueError('safe postprocess checkpoint mapping required')
         postprocess_state.update(next_state)
         dumps(postprocess_state)
+    phase('acquisition_completed')
+    phase('checkpoint_snapshot_started')
     with transaction(engine) as session:
         for identity, job_id in task_jobs.items():
             job = session.get(CollectionJob, job_id)
@@ -104,9 +118,14 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
                               "data_export_cursor":{"stream_id":stream_id,"sequence":sequence,"previous_bundle_id":previous_bundle_id},
                               "coverage_complete": False}
         roots = {name: sorted(set(session.scalars(select(list(table.primary_key.columns)[0]))) - before[name]) for name, table in registry.items()}
+        phase('checkpoint_snapshot_completed')
+        phase('checkpoint_export_started')
         paths = export_deltas(session, roots, output_root, stream_id=stream_id, sequence=sequence,
                             scope=scope, checkpoint=durable_checkpoint, raw_root=raw_root,previous_bundle_id=previous_bundle_id)
+    phase('checkpoint_export_completed')
+    phase('folder_publication_started')
     head = FolderTransport(transport_root, max_retained_bytes=max_private_bytes).publish_group(paths)
+    phase('folder_publication_completed')
     return {"status": "private_delta_committed", "head": head, "acquisition_runs": len(outcomes),
             "unfinished_tasks": len(durable_checkpoint["unfinished_task_ids"]),"delta_chunks":len(paths), "coverage_complete": False}
 

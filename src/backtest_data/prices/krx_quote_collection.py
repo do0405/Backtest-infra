@@ -106,7 +106,7 @@ def _queue_counts(session, services):
         .group_by(CollectionJob.status)).all())
 
 
-def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None):
+def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None, deadline=None):
     """Resume only KRX market-quote jobs under their existing fenced leases.
 
     The budget limits this invocation, never the planned dates or population.
@@ -116,6 +116,9 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None)
     selected = _services(services)
     if not isinstance(budget_seconds, (int, float)) or not math.isfinite(budget_seconds) or budget_seconds <= 0:
         raise ValueError("Positive finite execution budget required")
+    if deadline is not None and not math.isfinite(deadline):raise ValueError('Finite execution deadline required')
+    start=time.monotonic();local_deadline=start+budget_seconds
+    deadline=min(local_deadline,deadline) if deadline is not None else local_deadline
     credentials = load_credentials(sources=["krx"])
     if not getattr(credentials, "krx_api_key", None):
         return {"status": "blocked", "processed_this_run": 0, "blocked_sources": {"krx": "requires_credentials"},
@@ -126,10 +129,10 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None)
     from ..providers import KRXData
     http = ProviderHTTP(engine)
     provider = KRXData(http, credentials)
-    owner, start = new_id(), time.monotonic()
+    owner = new_id()
     processed, blocked, outcomes = 0, {}, deque(maxlen=100)
     try:
-        while time.monotonic() - start < budget_seconds:
+        while time.monotonic() < deadline:
             with transaction(engine) as session:
                 lease = acquire_job(session, owner, utcnow(), _LEASE_TTL, sources=["krx"],
                     domains=["market_quotes"], market="kr", request_services=selected, acquisition_clock=utcnow)
@@ -138,6 +141,13 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None)
                 job = session.get(CollectionJob, lease.job_id)
                 request, checkpoint = dict(job.request), dict(job.checkpoint)
             try:
+                if time.monotonic()>=deadline:
+                    # Only this still-valid fenced claim may be deferred. Keep
+                    # its exact checkpoint; a lost lease remains with its owner.
+                    with transaction(engine) as session:
+                        complete_job(session,lease,utcnow(),checkpoint,status='retry')
+                    outcomes.append({'job_id':lease.job_id,'status':'budget_deferred'})
+                    break
                 service = request["service"]
                 session_date = date.fromisoformat(request["session_date"])
                 if service not in selected or session_date > utcnow().astimezone(_SEOUL).date() - timedelta(days=1):
@@ -193,7 +203,7 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None)
     return {"status": "blocked" if blocked and not processed else "partial", "processed_this_run": processed,
         "blocked_sources": blocked, "requested_services": list(selected), "queue_status_counts": counts,
         "pending_requests": outstanding, "request_queue_complete": not outstanding and not blocked and not any(counts.get(status, 0) for status in ("unsupported", "failed")),
-        "elapsed_seconds": round(elapsed, 2), "budget_seconds": budget_seconds, "budget_exhausted": elapsed >= budget_seconds and outstanding > 0,
+        "elapsed_seconds": round(elapsed, 2), "budget_seconds": budget_seconds, "budget_exhausted": time.monotonic() >= deadline and outstanding > 0,
         "budget_semantics": "execution_only_never_changes_planned_period_or_population", "target_scope_preserved": True,
         "coverage_complete": False, "historical_identity_verified": False, "official_calendar_verified": False,
         "units_verified": False, "canonical_price_eligible": False, "outcomes": list(outcomes),

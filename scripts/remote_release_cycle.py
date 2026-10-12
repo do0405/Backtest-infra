@@ -1,11 +1,13 @@
 """Fresh hosted runner -> immutable published Release data and compact state."""
 import argparse
 from collections import Counter
+from datetime import datetime
 import json
 import os
 from pathlib import Path
 import shutil
 import sys
+import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from backtest_data.db import make_engine,transaction,utcnow
 from backtest_data.remote.bundle import digest,read_manifest,iter_bundle_rows
@@ -24,8 +26,17 @@ from backtest_data.ingestion.quota import (install_quota_controls,upsert_quota_p
     grant_allocation_day_credits,set_provider_cooldown)
 from backtest_data.ingestion.jobs import stable_hash
 
+# Make the existing 6000-second batch / 120-minute runner margin explicit.
+# Export remains atomic and may still exceed this operational reservation.
+EXPORT_RESERVE_SECONDS=1200
+
 
 def main():
+    started=time.monotonic();job_deadline=None
+    def phase(name):
+        value={'status':'remote_phase','phase':name,'elapsed_seconds':round(time.monotonic()-started,2)}
+        if job_deadline is not None:value['remaining_job_seconds']=round(max(0,job_deadline-time.monotonic()),2)
+        print(json.dumps(value),flush=True)
     parser=argparse.ArgumentParser()
     parser.add_argument('--work',type=Path,required=True)
     parser.add_argument('--budget-seconds',type=int,default=6000)
@@ -41,6 +52,7 @@ def main():
     work=args.work.resolve();work.mkdir(parents=True,exist_ok=True)
     gh=shutil.which('gh')
     if not gh:raise ValueError('GitHub CLI required')
+    phase('bootstrap_restore_started')
     bootstrap=json.loads(github(gh,['api',f"repos/{repo}/releases/tags/{binding['tag']}"]))
     if bootstrap.get('draft'):raise ValueError('committed catalog bootstrap required')
     archive=download_asset(gh,repo,bootstrap,'catalog.zip',work/'bootstrap-download')
@@ -66,6 +78,7 @@ def main():
         raise ValueError('original KRX task binding mismatch')
     if checkpoint.get('not_before') and utcnow()<checkpoint['not_before']:
         raise ValueError('prior account budget has not elapsed')
+    phase('bootstrap_restored')
     # This immutable control commit happens BEFORE provider HTTP. A crashed
     # hosted runner cannot make its allocated allowance available again.
     prior_clocks=[]
@@ -75,6 +88,13 @@ def main():
         run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
         budget_seconds=args.budget_seconds,now=utcnow(),target=os.environ['GITHUB_SHA'],
         record_not_before=prior_clocks.append)
+    acquisition_deadline=None
+    if allowance is not None and allowance.get('expires_at'):
+        expires_at=datetime.fromisoformat(allowance['expires_at'].replace('Z','+00:00'))
+        if expires_at.tzinfo is None or expires_at.utcoffset() is None:raise ValueError('aware hosted expiry required')
+        job_deadline=time.monotonic()+(expires_at-utcnow()).total_seconds()
+        acquisition_deadline=job_deadline-EXPORT_RESERVE_SECONDS
+    phase('quota_committed' if acquisition_deadline is not None else 'quota_deferred')
     engine=make_engine(os.environ['BACKTEST_DATABASE_URL'])
     raw=work/'raw'
     try:
@@ -83,29 +103,35 @@ def main():
             upsert_quota_policy(session,'krx:shared_account',minimum_interval_seconds=10,
                 window_kind='calendar_day',credit_limit=9500,require_allocation=True)
         def admit_rate(session):
-            if allowance is not None:
+            if acquisition_deadline is not None:
                 grant_allocation_day_credits(session,'krx:shared_account',allowance['credits_by_day'],
                     binding_hash=stable_hash(allowance))
             if prior_clocks:set_provider_cooldown(session,'krx:shared_account',max(prior_clocks))
+        phase('catalog_restore_started')
         for bundle in FolderTransport(work/'catalog').committed_bundles():
             with transaction(engine) as session:import_bundle(session,bundle,raw_root=raw)
+        phase('catalog_restored')
         store=work/'delta-store';store.mkdir()
         if prior:
             (store/'heads').mkdir()
             (store/'heads'/f'{stream}.json').write_text(json.dumps(prior['head']),encoding='utf-8')
+        collection_budget=min(args.budget_seconds,max(0,acquisition_deadline-time.monotonic())) if acquisition_deadline is not None else args.budget_seconds
         result=run_cycle(engine,raw,ownership=configuration,planned_jobs=[],incoming_bundles=[],
             output_root=work/'outgoing',transport_root=store,stream_id=stream,sequence=sequence,
-            checkpoint=checkpoint,budget_seconds=args.budget_seconds,max_private_bytes=MAX_ASSET,
-            previous_bundle_id=previous,source_handlers=run_owned_handlers if allowance is not None else deferred_handler,
+            checkpoint=checkpoint,budget_seconds=collection_budget,max_private_bytes=MAX_ASSET,
+            previous_bundle_id=previous,source_handlers=run_owned_handlers if acquisition_deadline is not None else deferred_handler,
             rate_admission=admit_rate,
-            source_handler_budget_seconds=args.budget_seconds,postprocess=None)
+            source_handler_budget_seconds=collection_budget,postprocess=None,
+            acquisition_deadline=acquisition_deadline,phase_callback=phase)
         head=result['head'];last=store/'bundles'/head['bundle_id']
         state=loads(json.dumps(read_manifest(last)['checkpoint']))
         state.update(handoff_id=configuration['handoff_id'],not_before=checkpoint.get('not_before'))
         # A separate compact state avoids restoring all past numeric observations
         # on each fresh runner. Immutable full deltas remain available to local SQL.
         write_state(work/'state.json.gz',state)
+        phase('portable_state_written')
         zip_store(store,work/'delta.zip')
+        phase('archive_prepared')
         counts=Counter()
         for path in (store/'bundles').glob('*/manifest.json'):
             for row in iter_bundle_rows(path.parent):counts[row['table']]+=1
@@ -119,12 +145,15 @@ def main():
         commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,indent=2),encoding='utf-8')
         tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
         notes=work/'release-notes.txt';notes.write_text('Committed source observations and portable checkpoint. Original IDs, hashes and capture clocks preserved. Coverage is incomplete.',encoding='utf-8')
+        phase('release_upload_started')
         github(gh,['release','create',tag,str(work/'delta.zip'),str(work/'state.json.gz'),str(commit_path),
             '--repo',repo,'--draft','--target',os.environ['GITHUB_SHA'],'--title','Data checkpoint '+stream+' '+str(head['sequence']),
             '--notes-file',str(notes)],timeout=300)
+        phase('release_uploaded')
         # Publication is the sole externally visible commit point. On upload
         # failure an unpublished draft cannot supersede the previous checkpoint.
         github(gh,['release','edit',tag,'--repo',repo,'--draft=false','--latest=false'])
+        phase('release_published')
         print(json.dumps({'status':'remote_release_committed','tag':tag,'head':head,'counts':dict(counts),
             'unfinished_tasks':result['unfinished_tasks'],'original_target_count':17758,'coverage_complete':False}))
     finally:engine.dispose()
