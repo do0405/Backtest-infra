@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   refresh:
-    if: vars.REMOTE_EXTENDED_ENABLED == 'true' && vars.REMOTE_EXTENDED_PARTITIONS_READY == 'true'
+    if: vars.REMOTE_EXTENDED_ENABLED == 'true' && vars.REMOTE_EXTENDED_PARTITIONS_READY == 'true' && (github.event_name == 'workflow_dispatch' || vars.REMOTE_EXTENDED_AUTOMATIC_READY == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     services:
