@@ -1,6 +1,7 @@
 """Windowless singleton invocation watchdog; existing collector/importer stay live."""
 import argparse
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from backtest_data.ops.continuation_manager import atomic_json, read_json
-from backtest_data.ops.remote_schedule import GitHubSchedule, advance
+from backtest_data.ops.remote_schedule import GitHubSchedule, advance, valid_review
 from backtest_data.remote.planner import validate_ownership
 
 
@@ -55,6 +56,34 @@ def verified_configuration(workspace, configuration):
         raise ValueError("existing_github_configuration_required")
     os.environ["GH_CONFIG_DIR"] = str(directory)
     return metadata
+
+
+def reviewed_failure(root, workspace):
+    """Read only an exact operator review and its preserved timeout evidence."""
+    path = root / "reviewed-failure.json"
+    if not path.exists():
+        return None
+    proof = read_json(path)
+    if not valid_review(proof):
+        raise ValueError("reviewed_failure_receipt_unconfirmed")
+    relative = proof.get("cause_proof_path")
+    if (not isinstance(relative, str) or not relative.startswith("artifacts/")
+            or any(part in {"", ".", ".."} for part in relative.split("/")) or "\\" in relative):
+        raise ValueError("reviewed_failure_cause_path_unconfirmed")
+    cause_path = (workspace / relative).resolve()
+    if not cause_path.is_relative_to((workspace / "artifacts").resolve()):
+        raise ValueError("reviewed_failure_cause_path_unconfirmed")
+    data = cause_path.read_bytes()
+    if sha256(data).hexdigest() != proof["cause_proof_sha256"]:
+        raise ValueError("reviewed_failure_cause_hash_unconfirmed")
+    cause = json.loads(data.decode("utf-8-sig"))
+    if (cause.get("timeout_annotation_confirmed") is not True or
+            cause.get("last_confirmed_phase", {}).get("name") != "archive_prepared" or
+            any(cause.get("run", {}).get(field) != proof[expected] for field, expected in
+                (("id", "failed_run_id"), ("run_attempt", "failed_run_attempt"),
+                 ("head_sha", "failed_head_sha"), ("conclusion", "failed_conclusion")))):
+        raise ValueError("reviewed_timeout_cause_unconfirmed")
+    return proof
 
 
 def main():
@@ -105,9 +134,15 @@ def main():
                     state.update(status="storage_space_required", requires_user=True)
                 else:
                     client = GitHubSchedule(gh, configuration["repository"])
-                    view = client.snapshot()
+                    review = reviewed_failure(root, workspace)
+                    binding = {key: configuration.get(key) for key in ("owner_id", "handoff_id", "manifest_id")}
+                    view = client.snapshot(reviewed_failure=review, ownership_binding=binding,
+                                           cause_proof_verified=review is not None)
                     budget = 6000 if state.get("intent") else args.initial_budget_seconds
-                    advance(state, view, client.dispatch, save,
+                    def dispatch(identity, budget_seconds):
+                        # advance saved this exact ref and digest in the intent.
+                        client.dispatch(identity, budget_seconds, ref=state["intent"].get("continuation_ref"))
+                    advance(state, view, dispatch, save,
                             now=datetime.now(timezone.utc), budget_seconds=budget)
                 state.pop("error_type", None)
             except Exception as exc:
