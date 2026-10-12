@@ -1,6 +1,6 @@
 {
-  "checked_at": "2026-10-12T04:00:42.154046+00:00",
-  "collection_outcome": "not_run",
+  "checked_at": "2026-10-12T04:01:04.681409+00:00",
+  "collection_outcome": "failure",
   "coverage_complete": false,
   "event": "workflow_dispatch",
   "format": "collection_health_v1",
@@ -9,7 +9,7 @@
     "commit_sha256": "2ffb829a60998da79238f20f10a8ffd26aadef7f62bbf78e23b2b9d4ec8f5052",
     "tag": "offline-core-forward-v1-000000004"
   },
-  "observed_by_run_id": 38202029647,
+  "observed_by_run_id": 38202035311,
   "requires_user": false,
   "run_attempt": 1,
   "workflows": {
