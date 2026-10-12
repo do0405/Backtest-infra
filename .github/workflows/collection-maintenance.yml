@@ -1,0 +1,31 @@
+name: Collection maintenance
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '31 8 * * 1'
+permissions:
+  contents: read
+jobs:
+  maintain:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    concurrency:
+      group: collection-health-owner
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Inspect schedules and commit actual collection health
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_COLLECTION_ALLOWED: ${{ vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && 'true' || 'false' }}
+          KRX_COLLECTION_ALLOWED: ${{ vars.REMOTE_PIPELINE_ENABLED == 'true' && vars.REMOTE_FREE_BUDGET_APPROVED == 'true' && vars.REMOTE_IDENTITY_HANDOFF_READY == 'true' && vars.REMOTE_DATA_PUBLIC_ALLOWED == 'true' && 'true' || 'false' }}
+        run: python scripts/offline_workflow_maintenance.py
