@@ -1,15 +1,15 @@
 {
-  "checked_at": "2026-10-12T12:45:37.324334+00:00",
-  "collection_outcome": "success",
+  "checked_at": "2026-10-12T18:05:58.727279+00:00",
+  "collection_outcome": "not_run",
   "coverage_complete": false,
-  "event": "workflow_run",
+  "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "4b09f3888115a04a876f88cd2ac25fa28e47f293",
+  "head_sha": "b2f1f9938522439b2c7c23b7794806368d9c6e4a",
   "latest_data_release": {
     "commit_sha256": "7c3202712add02a7649a4e9f6a09f2860f4022fb867d6733f38ffdcbab855498",
     "tag": "offline-core-forward-v1-000000008"
   },
-  "observed_by_run_id": 38247247097,
+  "observed_by_run_id": 38288616016,
   "requires_user": false,
   "run_attempt": 1,
   "workflows": {
