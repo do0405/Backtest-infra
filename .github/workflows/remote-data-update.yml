@@ -23,7 +23,7 @@ jobs:
   update:
     if: vars.REMOTE_PIPELINE_ENABLED == 'true' && vars.REMOTE_FREE_BUDGET_APPROVED == 'true' && vars.REMOTE_IDENTITY_HANDOFF_READY == 'true' && (github.event.repository.private == true || vars.REMOTE_DATA_PUBLIC_ALLOWED == 'true')
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     services:
       postgres:
         image: postgres:16.10

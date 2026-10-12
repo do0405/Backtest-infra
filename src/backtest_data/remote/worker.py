@@ -124,10 +124,12 @@ def run_cycle(engine, raw_root, *, ownership, planned_jobs, incoming_bundles, ou
                             scope=scope, checkpoint=durable_checkpoint, raw_root=raw_root,previous_bundle_id=previous_bundle_id)
     phase('checkpoint_export_completed')
     phase('folder_publication_started')
-    head = FolderTransport(transport_root, max_retained_bytes=max_private_bytes).publish_group(paths)
+    counts = {}
+    head = FolderTransport(transport_root, max_retained_bytes=max_private_bytes).publish_group(paths,row_counts=counts)
     phase('folder_publication_completed')
     return {"status": "private_delta_committed", "head": head, "acquisition_runs": len(outcomes),
-            "unfinished_tasks": len(durable_checkpoint["unfinished_task_ids"]),"delta_chunks":len(paths), "coverage_complete": False}
+            "unfinished_tasks": len(durable_checkpoint["unfinished_task_ids"]),"delta_chunks":len(paths),
+            "counts":counts, "coverage_complete": False}
 
 
 def main(argv=None):

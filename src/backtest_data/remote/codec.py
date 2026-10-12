@@ -2,6 +2,7 @@
 from datetime import date, datetime, timezone
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
 import json
 import re
 from urllib.parse import urlsplit, parse_qsl
@@ -10,8 +11,19 @@ PRIVATE_KEY = re.compile(r"(?:^|_)(?:api_key|apikey|secret|password|auth|authori
 
 
 def private_field(key):
+    key = str(key)
+    # Retain only short schema field names, never arbitrarily large input keys.
+    return _private_field(key) if len(key) <= 256 else _classify_private_field(key)
+
+
+@lru_cache(maxsize=4096)
+def _private_field(key):
+    return _classify_private_field(key)
+
+
+def _classify_private_field(key):
     # SEC taxonomy names such as OperatingLeaseCost are public financial data.
-    normalized=re.sub(r'(?<=[a-z0-9])(?=[A-Z])','_',str(key)).replace('-','_').lower()
+    normalized=re.sub(r'(?<=[a-z0-9])(?=[A-Z])','_',key).replace('-','_').lower()
     return bool(PRIVATE_KEY.search(normalized))
 
 
@@ -27,6 +39,17 @@ class PaginationCursor:
 
 def _private(mapping):
     return any(private_field(k) and not (k in {'next_page_token','page_token'} and isinstance(v,PaginationCursor)) for k,v in mapping.items())
+
+
+def _validate_string(value):
+    if value.startswith(('https://', 'http://')):
+        url = urlsplit(value)
+        if url.username or url.password or any(private_field(k) for k, _ in parse_qsl(url.query)):
+            raise ValueError('private URL is forbidden in payload')
+
+
+def reject_constant(_):
+    raise ValueError('nonfinite JSON')
 
 
 def pack(value):
@@ -45,9 +68,7 @@ def pack(value):
         if _private(value): raise ValueError("private field is forbidden in payload")
         return {str(k): pack(v) for k, v in value.items()}
     if isinstance(value, (tuple, list)): return [pack(v) for v in value]
-    if isinstance(value, str) and value.startswith(("https://", "http://")):
-        url = urlsplit(value)
-        if url.username or url.password or any(private_field(k) for k,_ in parse_qsl(url.query)): raise ValueError("private URL is forbidden in payload")
+    if isinstance(value, str): _validate_string(value)
     if value is None or isinstance(value, (str, bool, int)): return value
     raise ValueError("unsupported portable value type")
 
@@ -73,6 +94,7 @@ def unpack(value):
         return decoded
     if isinstance(value, list): return [unpack(v) for v in value]
     if isinstance(value, float): raise ValueError("binary float is forbidden")
+    if isinstance(value, str): _validate_string(value)
     return value
 
 
@@ -81,6 +103,5 @@ def dumps(value):
 
 
 def loads(value):
-    result = unpack(json.loads(value, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite JSON"))))
-    pack(result)  # Also inspect decoded URL strings and the full recursive tree.
-    return result
+    # Unpack validates keys, typed values and decoded URLs as it visits them.
+    return unpack(json.loads(value, parse_constant=reject_constant))

@@ -22,7 +22,7 @@ def test_owned_rate_restore_and_verified_admission_precede_source_http(tmp_path,
     monkeypatch.setattr(quota, 'restore_rate_state', lambda *args, **kwargs: events.append('restore'))
     monkeypatch.setattr(quota, 'snapshot_rate_state', lambda *args, **kwargs: events.append('snapshot') or {'version': 1})
     monkeypatch.setattr(worker, 'export_deltas', lambda *args, **kwargs: checkpoints.append(kwargs['checkpoint']) or [tmp_path])
-    monkeypatch.setattr(worker, 'FolderTransport', lambda *args, **kwargs: SimpleNamespace(publish_group=lambda paths: {}))
+    monkeypatch.setattr(worker, 'FolderTransport', lambda *args, **kwargs: SimpleNamespace(publish_group=lambda paths, **kw: {}))
     def admission(session):
         events.append('grant')
     def handler(*args, **kwargs):

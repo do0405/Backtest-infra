@@ -1,10 +1,11 @@
 """Bounded read-only provider transport; error text never includes request secrets."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from email.utils import parsedate_to_datetime
 import random
 import re
 import time
+import math
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -29,12 +30,34 @@ class ProviderResponse:
     content_type: str
 
 
+@dataclass
+class HTTPAttemptBudget:
+    """A single collector's admission limit, including transport retries."""
+    deadline: float
+    max_attempts: int | None = None
+    started: int = field(default=0, init=False)
+
+    def __post_init__(self):
+        if not math.isfinite(self.deadline) or self.max_attempts is not None and (
+            type(self.max_attempts) is not int or self.max_attempts <= 0):
+            raise ValueError('Finite HTTP deadline and positive attempt limit required')
+
+    def check(self,source,*,delay=0):
+        if time.monotonic()+delay>=self.deadline or self.max_attempts is not None and self.started>=self.max_attempts:
+            raise ProviderError(source,'rate_budget_deferred',retryable=True)
+
+    def begin(self,source):
+        self.check(source)
+        self.started+=1
+
+
 class ProviderHTTP:
     def __init__(self, engine, *, client=None, minimum_intervals=None, budget_scope="shared_account"):
         self.engine = engine
         self.client = client or httpx.Client(timeout=30, follow_redirects=False)
         self.intervals = minimum_intervals or {"sec": 0.25, "opendart": 0.5, "kis": 0.5, "directory": 0.2, "alpaca": 0.334, "krx": 10.0}
         self.budget_scope = budget_scope
+        self.request_budget = None
 
     def _validate(self, source, method, url):
         allowed = {"sec": {"www.sec.gov", "data.sec.gov"}, "opendart": {"opendart.fss.or.kr"},
@@ -64,6 +87,7 @@ class ProviderHTTP:
         if source not in self.intervals:
             raise ValueError("Unregistered source rate budget")
         for attempt in range(3):
+            if self.request_budget is not None:self.request_budget.check(source)
             try:
                 with transaction(self.engine) as session:
                     slot = reserve_rate_slot(session, f"{source}:{self.budget_scope}", utcnow(), self.intervals[source], max_delay_seconds=30)
@@ -72,9 +96,13 @@ class ProviderHTTP:
             delay = (slot - utcnow()).total_seconds()
             if delay > 30:
                 raise ProviderError(source, "rate_budget_deferred", retryable=True)
+            # A charged reservation is never refunded if its wait outlives this
+            # invocation. No HTTP begins after either its deadline or cap.
+            if self.request_budget is not None:self.request_budget.check(source,delay=max(0,delay))
             if delay > 0:
                 time.sleep(delay)
             try:
+                if self.request_budget is not None:self.request_budget.begin(source)
                 with self.client.stream(method, url, params=params, headers=headers, json=json) as response:
                     if response.status_code in {429, 500, 502, 503, 504}:
                         retry_delay = 0.0

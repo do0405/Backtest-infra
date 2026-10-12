@@ -44,11 +44,14 @@ def release_probe(monkeypatch, *, catalog_seconds, budget=6000, allowance=True):
     def transaction(_): yield N()
     def import_catalog(*args, **kwargs): clock[0] += catalog_seconds
     def cycle(*args, **kwargs): seen.update(kwargs); raise CycleCaptured
+    def reserve(*args, **kwargs):
+        seen['allocation_budget_seconds'] = kwargs['budget_seconds']
+        return allocation
     replacements = dict(Path=MemoryPath, validate_ownership=lambda _: [SLOT],
         github=lambda *a, **k: b'{}', download_asset=lambda *a, **k: MemoryPath('download'),
         digest=lambda _: 'a' * 64, restore=lambda *a: None, read_state=lambda _: checkpoint,
         inventory=lambda *a: [], validate_raw_identity_index=lambda _: None,
-        reserve_hosted_allowance=lambda *a, **k: allocation,
+        reserve_hosted_allowance=reserve,
         make_engine=lambda _: N(dispose=lambda: None), transaction=transaction,
         install_quota_controls=lambda _: None, upsert_quota_policy=lambda *a, **k: None,
         FolderTransport=lambda _: N(committed_bundles=lambda: ['catalog']),
@@ -87,6 +90,18 @@ def test_release_phase_output_has_only_safe_small_clock_records(monkeypatch, cap
     assert all(len(json.dumps(row)) < 250 for row in records)
 
 
+def test_publication_tail_does_not_extend_source_clock_or_overreserve_requests(monkeypatch):
+    module, seen = release_probe(monkeypatch, catalog_seconds=900)
+    assert module.PUBLICATION_TAIL_SECONDS == module.EXPECTED_COMPLETION_SECONDS == 7200
+    assert seen['acquisition_deadline'] == 6100
+    assert seen['allocation_budget_seconds'] == 2560
+    assert seen['source_handlers'].keywords['krx_batch_limits'] == {
+        'max_requests': 256, 'max_new_rows': 500000, 'max_raw_bytes': 128 * 1024 ** 2}
+    import yaml
+    workflow = yaml.safe_load((Path(__file__).resolve().parents[2]/'.github/workflows/remote-data-update.yml').read_text())
+    assert workflow['jobs']['update']['timeout-minutes'] * 60 == 7200 + module.PUBLICATION_TAIL_SECONDS
+
+
 @pytest.mark.parametrize('budget', [6000, 0])
 def test_expired_restoration_still_exports_exact_queue_raw_and_quota_state(monkeypatch, budget):
     from backtest_data.remote import worker
@@ -115,7 +130,7 @@ def test_expired_restoration_still_exports_exact_queue_raw_and_quota_state(monke
     monkeypatch.setattr(quota, 'restore_rate_state', lambda *a, **k: events.append('rate_restored'))
     monkeypatch.setattr(quota, 'snapshot_rate_state', lambda *a, **k: prior['provider_rate_state'])
     monkeypatch.setattr(worker, 'export_deltas', lambda *a, **k: exported.append(k['checkpoint']) or ['bundle'])
-    monkeypatch.setattr(worker, 'FolderTransport', lambda *a, **k: N(publish_group=lambda _: {'sequence': 12}))
+    monkeypatch.setattr(worker, 'FolderTransport', lambda *a, **k: N(publish_group=lambda _, **kw: {'sequence': 12}))
     phases = []
     worker.run_cycle(None, 'raw', ownership={'owner_id': 'krx-test', 'manifest_id': 'original'},
         planned_jobs=[], incoming_bundles=[], output_root='out', transport_root='store',

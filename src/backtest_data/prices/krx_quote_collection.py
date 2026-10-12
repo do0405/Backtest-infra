@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from ..credentials import load_credentials
 from ..db import new_id, transaction, utcnow
-from ..ingestion.http import ProviderError, ProviderHTTP
+from ..ingestion.http import ProviderError, ProviderHTTP, HTTPAttemptBudget
 from ..ingestion.jobs import (acquire_job, complete_current_job as complete_job, heartbeat_current_job as heartbeat_job,
     LeaseLost, logical_request, stable_hash)
 from ..ingestion.models import CollectionJob, TargetUniverseManifest
@@ -106,7 +106,8 @@ def _queue_counts(session, services):
         .group_by(CollectionJob.status)).all())
 
 
-def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None, deadline=None):
+def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None, deadline=None,
+                             max_new_rows=None,max_raw_bytes=None,max_requests=None):
     """Resume only KRX market-quote jobs under their existing fenced leases.
 
     The budget limits this invocation, never the planned dates or population.
@@ -117,6 +118,9 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None,
     if not isinstance(budget_seconds, (int, float)) or not math.isfinite(budget_seconds) or budget_seconds <= 0:
         raise ValueError("Positive finite execution budget required")
     if deadline is not None and not math.isfinite(deadline):raise ValueError('Finite execution deadline required')
+    limits={'max_new_rows':max_new_rows,'max_raw_bytes':max_raw_bytes,'max_requests':max_requests}
+    if any(value is not None and (type(value) is not int or value<=0) for value in limits.values()):
+        raise ValueError('Positive integer publication batch limits required')
     start=time.monotonic();local_deadline=start+budget_seconds
     deadline=min(local_deadline,deadline) if deadline is not None else local_deadline
     credentials = load_credentials(sources=["krx"])
@@ -128,11 +132,22 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None,
     # Provider activation and exact transport allowlisting belong to the provider layer.
     from ..providers import KRXData
     http = ProviderHTTP(engine)
+    attempt_budget=HTTPAttemptBudget(deadline=deadline,max_attempts=max_requests) if any(
+        value is not None for value in limits.values()) else None
+    if attempt_budget is not None:http.request_budget=attempt_budget
     provider = KRXData(http, credentials)
     owner = new_id()
     processed, blocked, outcomes = 0, {}, deque(maxlen=100)
+    new_rows=raw_bytes=requests_started=0
+    def volume_reached():
+        return (max_new_rows is not None and new_rows>=max_new_rows
+            or max_raw_bytes is not None and raw_bytes>=max_raw_bytes
+            or max_requests is not None and max(requests_started,attempt_budget.started)>=max_requests)
     try:
         while time.monotonic() < deadline:
+            # A response is always committed whole. Stop before the next claim,
+            # preserving all remaining jobs and their original checkpoints.
+            if volume_reached():break
             with transaction(engine) as session:
                 lease = acquire_job(session, owner, utcnow(), _LEASE_TTL, sources=["krx"],
                     domains=["market_quotes"], market="kr", request_services=selected, acquisition_clock=utcnow)
@@ -152,6 +167,7 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None,
                 session_date = date.fromisoformat(request["session_date"])
                 if service not in selected or session_date > utcnow().astimezone(_SEOUL).date() - timedelta(days=1):
                     raise ValueError("Invalid KRX job request")
+                requests_started+=1
                 response, payload = provider.daily_quotes(service, session_date)
                 with transaction(engine) as session:
                     fence = lambda: heartbeat_job(session, lease, utcnow(), _LEASE_TTL)
@@ -164,6 +180,8 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None,
                     complete_job(session, lease, utcnow(), outcome, status=status)
                 outcomes.append({"job_id": lease.job_id, "source": "krx", "domain": "market_quotes", "status": status, **outcome})
                 processed += 1
+                new_rows+=result.get('inserted',0)
+                raw_bytes+=len(response.content)
                 if not result["response_valid"]:
                     blocked["krx"] = "invalid_source_envelope"
                     break
@@ -204,6 +222,10 @@ def run_krx_quote_collection(engine, raw_root, *, budget_seconds, services=None,
         "blocked_sources": blocked, "requested_services": list(selected), "queue_status_counts": counts,
         "pending_requests": outstanding, "request_queue_complete": not outstanding and not blocked and not any(counts.get(status, 0) for status in ("unsupported", "failed")),
         "elapsed_seconds": round(elapsed, 2), "budget_seconds": budget_seconds, "budget_exhausted": time.monotonic() >= deadline and outstanding > 0,
+        "batch_limit_reached": bool(volume_reached() and outstanding>0), "batch_limits":limits,
+        "new_rows_this_run":new_rows,"raw_bytes_this_run":raw_bytes,
+        "requests_started":attempt_budget.started if attempt_budget is not None else requests_started,
+        "logical_requests_started":requests_started,
         "budget_semantics": "execution_only_never_changes_planned_period_or_population", "target_scope_preserved": True,
         "coverage_complete": False, "historical_identity_verified": False, "official_calendar_verified": False,
         "units_verified": False, "canonical_price_eligible": False, "outcomes": list(outcomes),

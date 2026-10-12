@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import uuid
-from .codec import dumps, loads, pack
+from .codec import dumps, loads, pack, unpack, reject_constant
 from .registry import validate_row
 
 MAX_BUNDLE_BYTES = 512 * 1024 * 1024
@@ -72,15 +72,22 @@ def write_bundle(root, rows, *, stream_id, sequence, scope, created_at=None, che
 
 
 def read_manifest(bundle, *, expected_manifest_hash=None):
+    return _read_manifest(bundle, expected_manifest_hash=expected_manifest_hash)[0]
+
+
+def _read_manifest(bundle, *, expected_manifest_hash=None):
+    """Return validated metadata and the hash of those same immutable bytes."""
     path = safe_path(bundle, "manifest.json")
     if path.stat().st_size > 128 * 1024 * 1024: raise ValueError("manifest size bound exceeded")
     # Hash, structural checks and private/typed-state validation must use the
     # same bytes. A portable checkpoint can be large on a slow local disk.
     content = path.read_bytes()
     if len(content) > 128 * 1024 * 1024: raise ValueError("manifest size bound exceeded")
-    if expected_manifest_hash and hashlib.sha256(content).hexdigest() != expected_manifest_hash: raise ValueError("manifest hash mismatch")
+    manifest_hash = hashlib.sha256(content).hexdigest()
+    if expected_manifest_hash and manifest_hash != expected_manifest_hash: raise ValueError("manifest hash mismatch")
     encoded = content.decode("utf-8")
-    raw = json.loads(encoded); loads(encoded)
+    raw = json.loads(encoded, parse_constant=reject_constant)
+    unpack(raw)
     if raw.get("format") != "backtest_remote_delta_v1" or raw.get("schema_version") != "c71302d6b910": raise ValueError("unsupported bundle version")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", raw.get("stream_id", "")) or type(raw.get("sequence")) is not int or raw["sequence"] < 1: raise ValueError("invalid stream sequence")
     try: uuid.UUID(raw["bundle_id"])
@@ -96,7 +103,7 @@ def read_manifest(bundle, *, expected_manifest_hash=None):
         if type(entry["bytes"]) is not int or entry["bytes"] < 0 or not re.fullmatch(r"[a-f0-9]{64}", entry["sha256"]): raise ValueError("invalid bundle file bound/hash")
         if entry["kind"] not in ("rows", "raw"): raise ValueError("unsupported bundle file kind")
         if entry["kind"] == "raw" and entry["path"] != "raw/" + entry.get("storage_key", ""): raise ValueError("unsafe raw file path")
-    return raw
+    return raw, manifest_hash
 
 
 def iter_bundle_rows(bundle, *, expected_manifest_hash=None):
