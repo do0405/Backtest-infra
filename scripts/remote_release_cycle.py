@@ -22,6 +22,7 @@ from backtest_data.remote.source_handlers import run_owned_handlers
 from backtest_data.remote.archives import restore
 from backtest_data.remote.identity import validate_raw_identity_index
 from backtest_data.remote.quota import reserve_hosted_allowance,deferred_handler
+from backtest_data.remote.krx_publication import publish_control,PublicationFailure,BoundedGhAPI,hosted_job_seconds
 from backtest_data.ingestion.quota import (install_quota_controls,upsert_quota_policy,
     grant_allocation_day_credits,set_provider_cooldown)
 from backtest_data.ingestion.jobs import stable_hash
@@ -58,6 +59,11 @@ def main():
     work=args.work.resolve();work.mkdir(parents=True,exist_ok=True)
     gh=shutil.which('gh')
     if not gh:raise ValueError('GitHub CLI required')
+    current_run=BoundedGhAPI(gh).get(f"repos/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+    remaining_job=hosted_job_seconds(current_run,source_sha=os.environ['GITHUB_SHA'],
+        run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),now=utcnow())
+    job_deadline=time.monotonic()+remaining_job
+    if remaining_job<1:raise PublicationFailure({'phase':'metadata','reason':'deadline','http_status':0})
     phase('bootstrap_restore_started')
     bootstrap=json.loads(github(gh,['api',f"repos/{repo}/releases/tags/{binding['tag']}"]))
     if bootstrap.get('draft'):raise ValueError('committed catalog bootstrap required')
@@ -93,14 +99,15 @@ def main():
         'handoff_id':configuration['handoff_id'],'bootstrap_sha256':binding['sha256']},work/'quota',
         run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
         budget_seconds=min(args.budget_seconds,HOSTED_KRX_BATCH_LIMITS['max_requests']*10),
-        now=utcnow(),target=os.environ['GITHUB_SHA'],
-        record_not_before=prior_clocks.append)
+        now=utcnow(),target='main',source_sha=os.environ['GITHUB_SHA'],
+        record_not_before=prior_clocks.append,phase_callback=phase,
+        publication_budget_seconds=min(2400,max(0,job_deadline-time.monotonic())))
     acquisition_deadline=None
     if allowance is not None and allowance.get('expires_at'):
         expires_at=datetime.fromisoformat(allowance['expires_at'].replace('Z','+00:00'))
         if expires_at.tzinfo is None or expires_at.utcoffset() is None:raise ValueError('aware hosted expiry required')
         quota_deadline=time.monotonic()+(expires_at-utcnow()).total_seconds()
-        job_deadline=quota_deadline+PUBLICATION_TAIL_SECONDS
+        job_deadline=min(job_deadline,quota_deadline+PUBLICATION_TAIL_SECONDS)
         acquisition_deadline=quota_deadline-EXPORT_RESERVE_SECONDS
     phase('quota_committed' if acquisition_deadline is not None else 'quota_deferred')
     engine=make_engine(os.environ['BACKTEST_DATABASE_URL'])
@@ -156,14 +163,14 @@ def main():
         notes=work/'release-notes.txt';notes.write_text('Committed source observations and portable checkpoint. Original IDs, hashes and capture clocks preserved. Coverage is incomplete.',encoding='utf-8')
         phase('commit_prepared')
         phase('release_upload_started')
-        publication_timeout=max(1,int(job_deadline-time.monotonic())) if job_deadline is not None else PUBLICATION_TAIL_SECONDS
-        github(gh,['release','create',tag,str(work/'delta.zip'),str(work/'state.json.gz'),str(commit_path),
-            '--repo',repo,'--draft','--target',os.environ['GITHUB_SHA'],'--title','Data checkpoint '+stream+' '+str(head['sequence']),
-            '--notes-file',str(notes)],timeout=publication_timeout)
-        phase('release_uploaded')
-        # Publication is the sole externally visible commit point. On upload
-        # failure an unpublished draft cannot supersede the previous checkpoint.
-        github(gh,['release','edit',tag,'--repo',repo,'--draft=false','--latest=false'])
+        publication_timeout=min(PUBLICATION_TAIL_SECONDS,int(job_deadline-time.monotonic())) if job_deadline is not None else PUBLICATION_TAIL_SECONDS
+        if publication_timeout<1:raise PublicationFailure({'phase':'publication','reason':'deadline','http_status':0,'elapsed_seconds':round(time.monotonic()-started,2)})
+        publish_control(gh,repo,tag,[work/'delta.zip',work/'state.json.gz',commit_path],
+            source_sha=os.environ['GITHUB_SHA'],run_id=os.environ['GITHUB_RUN_ID'],
+            run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
+            title='Data checkpoint '+stream+' '+str(head['sequence']),
+            notes=notes.read_text(encoding='utf-8'),budget_seconds=publication_timeout)
+        phase('release_verified')
         phase('release_published')
         print(json.dumps({'status':'remote_release_committed','tag':tag,'head':head,'counts':dict(counts),
             'unfinished_tasks':result['unfinished_tasks'],'original_target_count':17758,'coverage_complete':False}))
@@ -173,5 +180,6 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as exc:
-        print(json.dumps({'status':'remote_run_failed','error_type':type(exc).__name__}))
+        print(json.dumps({'status':'remote_run_failed','error_type':type(exc).__name__,
+            **({'publication_failure':exc.diagnostic()} if isinstance(exc,PublicationFailure) else {})}))
         raise SystemExit(2)

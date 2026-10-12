@@ -4,13 +4,15 @@ An allocation is consumed even if its runner fails before publishing data. This
 control namespace deliberately cannot be mistaken for a source-data checkpoint.
 """
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
 import re
 from zoneinfo import ZoneInfo
 
-from .releases import github, download_asset
+from ..db import utcnow
+from .krx_publication import BoundedGhAPI, PublicationFailure, publish_control
 
 DAILY_LIMIT = 9500
 MAX_RECEIPT_BYTES = 64 * 1024
@@ -19,7 +21,8 @@ BINDING_FIELDS = {'stream_id', 'manifest_id', 'handoff_id', 'bootstrap_sha256'}
 
 
 def _clock(value):
-    result = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace('Z', '+00:00'))
+    try:result = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (TypeError,AttributeError,ValueError):raise ValueError('aware quota clock required') from None
     if result.tzinfo is None or result.utcoffset() is None:
         raise ValueError('aware quota clock required')
     return result.astimezone(timezone.utc)
@@ -114,88 +117,122 @@ def allocation_tag(value):
     return f"quota-{value['stream_id']}-r{value['run_id']}-a{value['run_attempt']}"
 
 
-def publish_allocation(gh, repo, value, work, *, target):
-    """Return authorization only after the published immutable receipt matches."""
-    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
-        raise ValueError('explicit quota repository required')
+def publish_allocation(gh, repo, value, work, *, target='main', source_sha=None,
+                       budget_seconds=2400, phase_callback=None, api=None):
+    """Only exact publication and receipt readback authorize source HTTP."""
     tag = allocation_tag(value); work = Path(work); work.mkdir(parents=True, exist_ok=True)
     path = work / 'quota-allocation.json'
     path.write_text(json.dumps(value, sort_keys=True, indent=2), encoding='utf-8')
-    github(gh, ['release', 'create', tag, str(path), '--repo', repo, '--draft',
-                '--target', target, '--title', 'KRX request allowance',
-                '--notes', 'Pessimistic request allocation. Failed runs never refund credits.'], timeout=180)
-    github(gh, ['release', 'edit', tag, '--repo', repo, '--draft=false', '--latest=false'])
-    published = json.loads(github(gh, ['api', f'repos/{repo}/releases/tags/{tag}']))
-    if published.get('draft') is not False or published.get('tag_name') != tag:
-        raise ValueError('unpublished quota allocation')
-    received = download_asset(gh, repo, published, 'quota-allocation.json', work / 'readback',
-                              max_bytes=MAX_RECEIPT_BYTES)
-    restored = json.loads(received.read_text(encoding='utf-8'))
+    if phase_callback:phase_callback('quota_publication_started')
+    result = publish_control(gh, repo, tag, [path], source_sha=source_sha or target,
+        run_id=value['run_id'], run_attempt=value['run_attempt'],
+        title='KRX request allowance',
+        notes='Pessimistic request allocation. Failed runs never refund credits.',
+        budget_seconds=budget_seconds, readback_files=('quota-allocation.json',),
+        **({'api':api} if api is not None else {}))
+    restored = json.loads(result['readback_contents']['quota-allocation.json'])
     validate_allocation(restored, {field: value[field] for field in BINDING_FIELDS})
-    if restored != value:
-        raise ValueError('quota allocation readback mismatch')
+    if restored != value:raise ValueError('quota allocation readback mismatch')
+    published=_clock(result['release']['published_at'])
+    observed_at=_clock(utcnow())
+    if not _clock(value['created_at'])<=published<=_clock(value['expires_at']) or published>observed_at:
+        raise ValueError('quota publication clock conflict')
+    if phase_callback:phase_callback('quota_publication_verified')
     return restored
 
 
-def read_allocations(gh, repo, binding, work, *, now):
+def _pages(api, endpoint, *, actions=False):
+    # Every page is an individual bounded REST request. Partial history never
+    # grants admission. This transitional scan intentionally remains O(history).
+    for page in range(1,65):
+        payload=api.get(endpoint+('&' if '?' in endpoint else '?')+f'per_page=100&page={page}')
+        values=payload.get('workflow_runs') if actions and isinstance(payload,dict) else payload
+        if not isinstance(values,list) or len(values)>100:raise ValueError('complete quota history required')
+        yield values
+        if len(values)<100:return
+    raise ValueError('complete bounded quota history required')
+
+
+def read_allocations(gh, repo, binding, work, *, now, api=None):
     _binding(binding); now = _clock(now)
-    pages = json.loads(github(gh, ['api', '--paginate', '--slurp', f'repos/{repo}/releases?per_page=100']))
-    pattern = re.compile(r'^quota-' + re.escape(binding['stream_id']) + r'-r([1-9]\d*)-a([1-9]\d*)$')
-    result = []
-    for page in pages:
+    api=api or BoundedGhAPI(gh)
+    pattern = re.compile(r'^quota-' + re.escape(binding['stream_id']) + r'-r([1-9]\d{0,29})-a([1-9]\d{0,3})$')
+    result = [];identities=set();potential_days=set(_days(now,now+timedelta(hours=2)))
+    for page in _pages(api,f'repos/{repo}/releases'):
         for release in page:
-            match = pattern.fullmatch(release.get('tag_name', ''))
-            if not match or release.get('draft') or release.get('prerelease'):
-                continue
-            if _clock(release['created_at']) < now - timedelta(days=2):
-                continue
-            path = download_asset(gh, repo, release, 'quota-allocation.json',
-                                  Path(work) / str(release['id']), max_bytes=MAX_RECEIPT_BYTES)
-            value = json.loads(path.read_text(encoding='utf-8'))
-            validate_allocation(value, binding)
-            if allocation_tag(value) != release['tag_name']:
-                raise ValueError('quota tag identity mismatch')
-            result.append(value)
+            if not isinstance(release,dict):raise ValueError('quota release proof required')
+            tag=release.get('tag_name','')
+            if not isinstance(tag,str):raise ValueError('quota tag proof required')
+            if not tag.startswith('quota-'+binding['stream_id']+'-'):continue
+            if not pattern.fullmatch(tag) or release.get('draft') is not False or release.get('prerelease') is not False:
+                raise ValueError('uncertain quota publication')
+            # Release.created_at can describe the old target commit. Validate
+            # receipt contents first, then prune ONLY its allocated Korean days.
+            published=_clock(release.get('published_at'))
+            assets=release.get('assets')
+            if not isinstance(assets,list) or len(assets)!=1:raise ValueError('exact quota receipt asset required')
+            asset=assets[0]
+            if asset.get('name')!='quota-allocation.json' or type(asset.get('id')) is not int or asset['id']<1 or type(asset.get('size')) is not int or not 0<asset['size']<=MAX_RECEIPT_BYTES:
+                raise ValueError('bounded quota receipt required')
+            content=api.get(f"repos/{repo}/releases/assets/{asset['id']}",raw=True)
+            if not isinstance(content,bytes) or len(content)!=asset['size'] or len(content)>MAX_RECEIPT_BYTES:raise ValueError('quota receipt size mismatch')
+            if asset.get('digest') and asset['digest']!='sha256:'+hashlib.sha256(content).hexdigest():raise ValueError('quota receipt digest mismatch')
+            value=json.loads(content)
+            validate_allocation(value,binding)
+            if allocation_tag(value)!=tag:raise ValueError('quota tag identity mismatch')
+            created=_clock(value['created_at']);expires=_clock(value['expires_at'])
+            if not created<=published<=expires or published>now or created>now:raise ValueError('quota publication clock conflict')
+            identity=(value['run_id'],value['run_attempt'])
+            if identity in identities:raise ValueError('duplicate quota allocation identity')
+            identities.add(identity)
+            if potential_days.intersection(value['credits_by_day']):result.append(value)
     return result
 
 
 def reserve_hosted_allowance(gh, repo, binding, work, *, run_id, run_attempt,
-                             budget_seconds, now, target,record_not_before=None):
+                             budget_seconds, now, target,record_not_before=None, source_sha=None,
+                             publication_budget_seconds=2400, phase_callback=None, api=None):
     """Read the current owner lane, conservatively charge legacy generations."""
-    now = _clock(now)
-    current = json.loads(github(gh, ['api', f'repos/{repo}/actions/runs/{run_id}']))
-    if current['run_attempt'] != run_attempt:
-        raise ValueError('hosted attempt binding mismatch')
-    deadline = _clock(current['run_started_at']) + timedelta(hours=2)
-    if now >= deadline:
-        return None
-    allocations = read_allocations(gh, repo, binding, Path(work) / 'previous', now=now)
-    pages = json.loads(github(gh, ['api', '--paginate', '--slurp',
-        f'repos/{repo}/actions/workflows/remote-data-update.yml/runs?per_page=100']))
-    runs = []
-    for page in pages:
-        for run in page['workflow_runs']:
-            if str(run['id']) == str(run_id):
-                # A rerun may have earlier attempts on different Korean days.
-                attempts = range(1, run_attempt)
-            elif _clock(run['updated_at']) >= now - timedelta(days=2):
-                attempts = range(1, run.get('run_attempt', 1) + 1)
-            else:
-                continue
-            for attempt in attempts:
-                if attempt == run.get('run_attempt', 1):
-                    evidence = run
+    try:
+        now = _clock(now)
+        if api is None:api=BoundedGhAPI(gh,budget_seconds=publication_budget_seconds)
+        current=api.get(f'repos/{repo}/actions/runs/{run_id}')
+        if str(current.get('id'))!=str(run_id) or current.get('head_sha')!=(source_sha or target) or current['run_attempt'] != run_attempt:
+            raise ValueError('hosted attempt binding mismatch')
+        deadline = _clock(current['run_started_at']) + timedelta(hours=2)
+        if now >= deadline:
+            return None
+        allocations = read_allocations(gh, repo, binding, Path(work) / 'previous', now=now,api=api)
+        pages = _pages(api,f'repos/{repo}/actions/workflows/remote-data-update.yml/runs',actions=True)
+        runs = []
+        for page in pages:
+            for run in page:
+                if str(run['id']) == str(run_id):
+                    # A rerun may have earlier attempts on different Korean days.
+                    attempts = range(1, run_attempt)
+                elif _clock(run['updated_at']) >= now - timedelta(days=2):
+                    attempts = range(1, run.get('run_attempt', 1) + 1)
                 else:
-                    evidence = json.loads(github(gh, ['api', f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}"]))
-                runs.append({**evidence, 'run_attempt': attempt})
-    if record_not_before is not None:
-        completed=[_clock(run['updated_at']) for run in runs if run['status']=='completed']
-        if completed:record_not_before(max(completed)+timedelta(seconds=10))
-    value = plan_allocation(binding, allocations, runs, run_id=str(run_id), run_attempt=run_attempt,
-                            now=now, expires_at=deadline, budget_seconds=budget_seconds)
-    if value is None:
+                    continue
+                for attempt in attempts:
+                    if attempt == run.get('run_attempt', 1):
+                        evidence = run
+                    else:
+                        evidence = api.get(f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}")
+                    runs.append({**evidence, 'run_attempt': attempt})
+        if record_not_before is not None:
+            completed=[_clock(run['updated_at']) for run in runs if run['status']=='completed']
+            if completed:record_not_before(max(completed)+timedelta(seconds=10))
+        value = plan_allocation(binding, allocations, runs, run_id=str(run_id), run_attempt=run_attempt,
+                                now=now, expires_at=deadline, budget_seconds=budget_seconds)
+        if value is None:
+            return None
+        return publish_allocation(gh, repo, value, Path(work) / 'admission', target=target,source_sha=source_sha,
+            budget_seconds=int(api.remaining()),phase_callback=phase_callback,api=api)
+    except PublicationFailure as failure:
+        if failure.diagnostic()['reason'] not in {'deadline','request_budget'}:raise
+        if phase_callback:phase_callback('quota_publication_deferred',publication_failure=failure.diagnostic())
         return None
-    return publish_allocation(gh, repo, value, Path(work) / 'admission', target=target)
 
 
 def deferred_handler(engine, raw_root, *, checkpoint, **kwargs):

@@ -28,7 +28,8 @@ class MemoryPath:
 class CycleCaptured(Exception): pass
 
 
-def release_probe(monkeypatch, *, catalog_seconds, budget=6000, allowance=True):
+def release_probe(monkeypatch, *, catalog_seconds, budget=6000, allowance=True,
+                  run_elapsed=0, expected_exception=CycleCaptured):
     path = Path(__file__).resolve().parents[2] / 'scripts/remote_release_cycle.py'
     spec = importlib.util.spec_from_file_location('remote_release_budget_test', path)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
@@ -47,7 +48,13 @@ def release_probe(monkeypatch, *, catalog_seconds, budget=6000, allowance=True):
     def reserve(*args, **kwargs):
         seen['allocation_budget_seconds'] = kwargs['budget_seconds']
         return allocation
+    class RunAPI:
+        def get(self, url):
+            seen['preflight_url'] = url
+            return {'id': 1, 'run_attempt': 1, 'head_sha': 'a' * 40,
+                    'run_started_at': (NOW - timedelta(seconds=run_elapsed)).isoformat()}
     replacements = dict(Path=MemoryPath, validate_ownership=lambda _: [SLOT],
+        BoundedGhAPI=lambda *a, **k: RunAPI(),
         github=lambda *a, **k: b'{}', download_asset=lambda *a, **k: MemoryPath('download'),
         digest=lambda _: 'a' * 64, restore=lambda *a: None, read_state=lambda _: checkpoint,
         inventory=lambda *a: [], validate_raw_identity_index=lambda _: None,
@@ -63,9 +70,10 @@ def release_probe(monkeypatch, *, catalog_seconds, budget=6000, allowance=True):
     monkeypatch.setattr(worker.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(module.sys, 'argv', ['probe', '--work', 'in-memory', '--budget-seconds', str(budget)])
     for name, value in {'REPOSITORY': 'owner/repo', 'REMOTE_OWNERSHIP': json.dumps(configuration),
-        'GITHUB_RUN_ID': '1', 'GITHUB_SHA': 'a' * 40, 'BACKTEST_DATABASE_URL': 'never-connect'}.items():
+        'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1',
+        'GITHUB_SHA': 'a' * 40, 'BACKTEST_DATABASE_URL': 'never-connect'}.items():
         monkeypatch.setenv(name, value)
-    with pytest.raises(CycleCaptured): module.main()
+    with pytest.raises(expected_exception): module.main()
     return module, seen
 
 
@@ -80,6 +88,20 @@ def test_catalog_elapsed_reduces_only_the_remaining_hosted_envelope(monkeypatch,
 def test_no_usable_allowance_keeps_deferred_export_without_http(monkeypatch, allowance):
     module, seen = release_probe(monkeypatch, catalog_seconds=900, allowance=allowance)
     assert seen['source_handlers'] is module.deferred_handler
+
+
+def test_expired_original_host_clock_never_restores_or_acquires(monkeypatch):
+    from backtest_data.remote.krx_publication import PublicationFailure
+    _, seen = release_probe(monkeypatch, catalog_seconds=0, run_elapsed=14400,
+                            expected_exception=PublicationFailure)
+    assert set(seen) == {'preflight_url'}
+
+
+def test_deferred_quota_does_not_restart_original_host_clock(monkeypatch, capsys):
+    release_probe(monkeypatch, catalog_seconds=900, allowance=None, run_elapsed=3600)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    restored = next(row for row in records if row['phase'] == 'catalog_restored')
+    assert restored['remaining_job_seconds'] == 9900
 
 
 def test_release_phase_output_has_only_safe_small_clock_records(monkeypatch, capsys):

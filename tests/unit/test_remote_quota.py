@@ -79,29 +79,23 @@ def test_quota_releases_are_outside_existing_data_inventory():
 
 def test_published_allocation_requires_exact_readback_before_return(tmp_path, monkeypatch):
     from backtest_data.remote import quota
-    events = []
-    expected = receipt()
-    release = {'draft': False, 'tag_name': 'quota-krx-test-r1-a1', 'assets': []}
-    def github(gh, arguments, **kwargs):
-        events.append(arguments[:2])
-        if arguments[0] == 'api':
-            return json.dumps(release).encode()
-        return b''
-    def download(*args, **kwargs):
-        destination = tmp_path / 'readback.json'
-        destination.write_text(json.dumps(expected), encoding='utf-8')
-        events.append(['verified', 'download'])
-        return destination
-    monkeypatch.setattr(quota, 'github', github)
-    monkeypatch.setattr(quota, 'download_asset', download)
-    assert quota.publish_allocation('gh', 'a/b', expected, tmp_path, target='b' * 40) == expected
-    assert events == [['release', 'create'], ['release', 'edit'], ['api', 'repos/a/b/releases/tags/quota-krx-test-r1-a1'], ['verified', 'download']]
+    expected=receipt();events=[]
+    def publish(*args,**kwargs):
+        events.append(kwargs)
+        return {'release':{'published_at':expected['created_at']},'readback_contents':{'quota-allocation.json':json.dumps(expected).encode()}}
+    monkeypatch.setattr(quota,'publish_control',publish)
+    assert quota.publish_allocation('gh','a/b',expected,tmp_path,target='b'*40)==expected
+    assert events[0]['source_sha']=='b'*40 and events[0]['readback_files']==('quota-allocation.json',)
 
 
 def test_mismatched_or_unpublished_allocation_never_authorizes(tmp_path, monkeypatch):
     from backtest_data.remote import quota
-    expected = receipt()
-    monkeypatch.setattr(quota, 'github', lambda *args, **kwargs: json.dumps({'draft': True}).encode())
-    monkeypatch.setattr(quota, 'download_asset', lambda *args, **kwargs: pytest.fail('draft downloaded'))
-    with pytest.raises(ValueError, match='unpublished'):
-        quota.publish_allocation('gh', 'a/b', expected, tmp_path, target='b' * 40)
+    expected=receipt()
+    def publish(*args,**kwargs):raise ValueError('unpublished')
+    monkeypatch.setattr(quota,'publish_control',publish)
+    with pytest.raises(ValueError,match='unpublished'):
+        quota.publish_allocation('gh','a/b',expected,tmp_path,target='b'*40)
+    different={**expected,'run_attempt':2}
+    monkeypatch.setattr(quota,'publish_control',lambda *a,**k:{'readback_contents':{'quota-allocation.json':json.dumps(different).encode()}})
+    with pytest.raises(ValueError,match='readback mismatch'):
+        quota.publish_allocation('gh','a/b',expected,tmp_path,target='b'*40)
