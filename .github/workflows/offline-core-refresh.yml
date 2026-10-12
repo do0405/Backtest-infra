@@ -6,6 +6,11 @@ on:
         description: Bounded acquisition time with checkpoint export margin
         default: '5400'
         required: false
+      qualify_sec:
+        description: One bounded original-target SEC API qualification capture
+        type: boolean
+        default: false
+        required: false
   schedule:
     - cron: '13 0-22/2 * * *'
   workflow_run:
@@ -40,4 +45,5 @@ jobs:
           OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           BUDGET_SECONDS: ${{ inputs.budget_seconds || '5400' }}
+          QUALIFY_SEC: ${{ inputs.qualify_sec && 'true' || 'false' }}
         run: python scripts/offline_runtime_launcher.py

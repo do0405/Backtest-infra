@@ -6,7 +6,13 @@ Each successful run publishes hashed capture bundles, a resumable source checkpo
 
 The target denominator remains the original 17,758 securities. A source watermark means that discovery or traversal was attempted; it does not certify complete market data. Empty price windows retain six-hour retries. Recent fourteen-day price corrections run once per completed weekday. Deferred financial reports remain in the checkpoint for later extraction retries.
 
+Denied SEC archive/index access switches to a resumable scan of all 6,026 target issuers and exact-accession companyfacts evidence. API taxonomy/context is explicitly separate from XML context and remains unqualified. Rejected or oversized OpenDART XBRL keeps its safety bounds and falls back to structured figures only when receipt, corporation, year, report code and financial scope match. Financial retry queues reserve three fresh turns per due retry so old unsupported reports cannot starve current filings.
+
+Source row anomalies and partial financial extraction are retained with validation evidence and incomplete flags; they do not promote unsupported figures or block every later capture. Supplier ticker case-fold collisions are isolated and the remaining exact bulk response is fetched again. Per-run capture metadata is bounded before publication, with a rejected step restored for the next run.
+
 Local login synchronization validates catalog, hashes and the release chain, then resolves native issuer/security identities and commits per-capture SQL receipts. SQL receipts are authoritative after a database restoration; a disk acknowledgment is only a cache. Repeated synchronization does not duplicate captures. The new windowless login task is `BacktestInfra-OfflineCoreSync`, polling every five minutes and retrying temporary connectivity or database outages.
+
+Local SQL import and remote provider health are reported separately. A hash-bound snapshot identifies provider authentication or policy failures requiring action even during old-release catch-up; capacity and network deferrals remain visible as retry status. Large offline backlogs can take time to import while existing collectors use the same local disk.
 
 The workflow uses standard public-repository hosted runners with a two-hour job bound, a ninety-minute acquisition budget and export margin. Source budgets reserve separate local and hosted slices before acquisition. OpenDART reservations remain charged conservatively for twenty-six hours, including failed runs. No paid runner or paid storage service is configured.
 
