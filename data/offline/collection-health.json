@@ -1,25 +1,25 @@
 {
-  "checked_at": "2026-10-13T19:30:18.618536+00:00",
+  "checked_at": "2026-10-13T22:47:30.795647+00:00",
   "collection_outcome": "success",
   "coverage_complete": false,
   "event": "workflow_run",
   "format": "collection_health_v1",
-  "head_sha": "a369d242d5e9c7a529f86cf14c744e6510014a02",
+  "head_sha": "f8c4283a06694625591bbbc43261a693ea3a1198",
   "latest_data_release": {
-    "commit_sha256": "9edafc0f0a2886c7b036be3005a0298fc8d4fe3897032f0a2aabced72fe0abcf",
-    "tag": "offline-core-forward-v1-000000022"
+    "commit_sha256": "dd242cc61fa01b6aa71e3085ac865f50920f8457b1d0b82fdca6ed7fba5128f3",
+    "tag": "offline-core-forward-v1-000000023"
   },
-  "observed_by_run_id": 38453819258,
+  "observed_by_run_id": 38472184417,
   "requires_user": false,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
       "attention": null,
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-10-13T17:35:18Z",
-        "id": 38439860132,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-10-13T22:42:40Z",
+        "id": 38479591611,
+        "status": "pending"
       },
       "operator_enabled": true,
       "recovered": false,
