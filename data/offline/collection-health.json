@@ -1,15 +1,15 @@
 {
-  "checked_at": "2026-10-14T02:38:44.091896+00:00",
+  "checked_at": "2026-10-14T04:09:32.687005+00:00",
   "collection_outcome": "success",
   "coverage_complete": false,
-  "event": "workflow_run",
+  "event": "workflow_dispatch",
   "format": "collection_health_v1",
-  "head_sha": "28c31cb3881a1bf769eecb5f4b7b7857d250094c",
+  "head_sha": "8c56adbed1b295c910fbd2cddc97470c2d2f400f",
   "latest_data_release": {
-    "commit_sha256": "653a80bb7fd3c83dfca4d3885bf9fc704c272e77a5df605a056546dccb0a1055",
-    "tag": "offline-core-forward-v1-000000027"
+    "commit_sha256": "f93a68675dc7d015c73dce8d3f64be194c665a1c48a810216abcdb8867225d20",
+    "tag": "offline-core-forward-v1-000000028"
   },
-  "observed_by_run_id": 38501776521,
+  "observed_by_run_id": 38509031294,
   "requires_user": false,
   "run_attempt": 1,
   "workflows": {
@@ -28,14 +28,14 @@
     "remote-data-update.yml": {
       "attention": null,
       "latest_observed_schedule": {
-        "conclusion": null,
+        "conclusion": "success",
         "created_at": "2026-10-14T02:10:34Z",
         "id": 38499652524,
-        "status": "in_progress"
+        "status": "completed"
       },
       "operator_enabled": false,
       "recovered": false,
-      "state": "active"
+      "state": "disabled_manually"
     }
   }
 }
