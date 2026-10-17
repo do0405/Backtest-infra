@@ -1,6 +1,6 @@
 {
   "catalog_sha256": "c44fbc9cef2b0eb036a1328a7a10e09665842b17045baf7f1c209f35a40ccabb",
-  "commit_sha256": "e66f75b2dfce58c0d95b53c238693c72776153919e163b83a6301aa766cdab96",
+  "commit_sha256": "4715066b4ba847a511b49a60e9622484fb16a97ab8fbdb5300aa3f253c8d4217",
   "coverage_complete": false,
   "format": "offline_source_index_v1",
   "provider_status": {
@@ -20,8 +20,8 @@
   "source_watermarks": {
     "alpaca": "2026-10-15",
     "opendart": "2026-10-16",
-    "sec": "2026-10-15"
+    "sec": "2026-10-16"
   },
   "stream_id": "core-forward-v1",
-  "tag": "offline-core-forward-v1-000000044"
+  "tag": "offline-core-forward-v1-000000045"
 }
