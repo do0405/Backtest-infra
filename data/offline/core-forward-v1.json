@@ -1,6 +1,6 @@
 {
   "catalog_sha256": "c44fbc9cef2b0eb036a1328a7a10e09665842b17045baf7f1c209f35a40ccabb",
-  "commit_sha256": "82c15ce6318817edf200f242a08b24da2c36a2483f56489950f966b741076304",
+  "commit_sha256": "3720b629cbed9c9f585979df213c043b538d6ac5b5b77ad368942d72364f4db9",
   "coverage_complete": false,
   "format": "offline_source_index_v1",
   "provider_status": {
@@ -22,5 +22,5 @@
     "sec": "2026-10-16"
   },
   "stream_id": "core-forward-v1",
-  "tag": "offline-core-forward-v1-000000046"
+  "tag": "offline-core-forward-v1-000000047"
 }
