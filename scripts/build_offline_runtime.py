@@ -42,6 +42,7 @@ def build(base, output):
         with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as target:
             for name in sorted([item.filename for item in entries] + ['scripts/offline_publication.py']):
                 info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.create_system = 0  # Keep ZIP metadata identical across Windows and Linux.
                 info.compress_type = zipfile.ZIP_DEFLATED
                 target.writestr(info, (directory/name).read_bytes())
     return sha256(output.read_bytes()).hexdigest()
@@ -53,3 +54,4 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     arguments = parser.parse_args()
     print(build(arguments.base, arguments.output))
+
