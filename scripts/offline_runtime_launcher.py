@@ -3,10 +3,23 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import subprocess
 import sys
 import zipfile
+
+
+def runtime_binding(configuration, path):
+    """A reviewed public pin changes only the runtime, preserving private gates."""
+    if not Path(path).exists(): return configuration
+    pin = json.loads(Path(path).read_text(encoding='utf-8'))
+    if (set(pin) != {'format', 'runtime_tag', 'runtime_sha256'} or
+            pin['format'] != 'offline_runtime_pin_v1' or
+            not re.fullmatch(r'offline-core-runtime-v\d+-\d{8}', pin['runtime_tag']) or
+            not re.fullmatch(r'[a-f0-9]{64}', pin['runtime_sha256'])):
+        raise ValueError('complete approved runtime binding required')
+    return {**configuration, 'runtime_tag': pin['runtime_tag'], 'runtime_sha256': pin['runtime_sha256']}
 
 
 def github(arguments, output=None):
@@ -18,7 +31,8 @@ def github(arguments, output=None):
 
 
 def main():
-    config=json.loads(os.environ['OFFLINE_CONFIGURATION']);repo=os.environ['REPOSITORY']
+    config=runtime_binding(json.loads(os.environ['OFFLINE_CONFIGURATION']),Path(__file__).with_name('offline-runtime.json'))
+    repo=os.environ['REPOSITORY']
     directory=Path(os.environ['RUNNER_TEMP'])/'offline-isolated-runtime';directory.mkdir()
     release=json.loads(github(['api',f"repos/{repo}/releases/tags/{config['runtime_tag']}"]))
     assets=[row for row in release.get('assets',[]) if row['name']=='runtime.zip']

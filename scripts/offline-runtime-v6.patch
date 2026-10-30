@@ -1,0 +1,177 @@
+--- a/scripts/offline_refresh.py
++++ b/scripts/offline_refresh.py
+@@ -17,25 +17,42 @@
+ from backtest_data.offline.transport import GitHubCaptureTransport
+ from backtest_data.credentials import load_credentials
+ from backtest_data.remote.releases import github
++from offline_publication import GitHubError
+ 
+ 
+ def publish_index(gh, repo, commit, state, work):
+     """Persist a real data-release index, giving repository activity useful content."""
+     import base64
++    from offline_publication import github as safe_github
+     index={'format':'offline_source_index_v1','stream_id':commit.manifest['stream_id'],
+         'catalog_sha256':commit.manifest['catalog_sha256'],'tag':commit.tag,'commit_sha256':commit.sha256,
+         'source_watermarks':{source:value['watermark'] for source,value in state['sources'].items()},
+         'provider_status':state['provider_status'],'coverage_complete':False}
+     content=json.dumps(index,sort_keys=True,indent=2).encode()
+     path='data/offline/'+commit.manifest['stream_id']+'.json'
+-    # Directory listing avoids treating first-generation 404 as a network failure.
+-    tree=json.loads(github(gh,['api',f'repos/{repo}/git/trees/main?recursive=1']))
+-    if tree.get('truncated'):raise ValueError('source index inventory truncated')
+-    entry=next((row for row in tree.get('tree',[]) if row['path']==path),None)
+-    body={'message':'Update committed offline source index '+commit.tag,'content':base64.b64encode(content).decode(),'branch':'main'}
+-    if entry:body['sha']=entry['sha']
+-    request=Path(work)/'source-index-request.json';request.write_text(json.dumps(body),encoding='utf-8')
+-    github(gh,['api','--method','PUT',f'repos/{repo}/contents/{path}','--input',str(request)])
++    endpoint=f'repos/{repo}/contents/{path}'
++    def current():
++        try:return safe_github(gh,endpoint+'?ref=main')
++        except GitHubError as exc:
++            if exc.status==404:return None
++            raise
++    for attempt in range(4):
++        entry=current()
++        if entry and base64.b64decode(entry.get('content',''))==content:return
++        body={'message':'Update committed offline source index '+commit.tag,
++              'content':base64.b64encode(content).decode(),'branch':'main'}
++        if entry:body['sha']=entry['sha']
++        try:safe_github(gh,endpoint,method='PUT',body=body)
++        except GitHubError as exc:
++            verified=current()
++            if verified and base64.b64decode(verified.get('content',''))==content:return
++            if (exc.status not in {409,422} and not exc.retryable) or attempt==3:raise
++            time.sleep(2**(attempt+1))
++            continue
++        verified=current()
++        if not verified or base64.b64decode(verified.get('content',''))!=content:
++            raise ValueError('committed source index readback required')
++        return
+ 
+ 
+ def main():
+@@ -87,5 +104,6 @@
+ if __name__=='__main__':
+     try:main()
+     except Exception as exc:
+-        print(json.dumps({'status':'offline_capture_failed','error_type':type(exc).__name__}),flush=True)
++        print(json.dumps({'status':'offline_capture_failed','error_type':type(exc).__name__,
++                          **(exc.safe_details() if hasattr(exc,'safe_details') else {})}),flush=True)
+         raise SystemExit(2)
+--- a/src/backtest_data/offline/transport.py
++++ b/src/backtest_data/offline/transport.py
+@@ -312,27 +312,31 @@
+                 yield items
+ 
+     def publish(self, bundles, state):
++        from offline_publication import github as safe_github, publish_files
+         previous = self.last_committed()
+         sequence = previous.sequence + 1 if previous else 1
+         manifest, files = prepare_release(bundles, state, stream=self.stream,
+             catalog_sha256=self.catalog_sha256, sequence=sequence, previous=previous)
+         tag = release_tag(self.stream, sequence)
+-        # Only an unpublished draft at the next sequence can be replaced after
+-        # an interrupted upload. A published generation is never overwritten.
+-        for release in self._inventory():
+-            if release.get("tag_name") == tag:
+-                if not release.get("draft"):
+-                    raise ValueError("published release is immutable")
+-                github(self.gh, ["release", "delete", tag, "--repo", self.repository, "--yes"])
++        # Preserve partial drafts. Matching uploaded bytes are reused; a
++        # conflicting checkpoint requires recovery instead of deleting captures.
++        matches = [release for release in self._inventory() if release.get("tag_name") == tag]
++        if len(matches) > 1: raise ValueError("unique pending release required")
++        api = lambda endpoint, **options: safe_github(self.gh, endpoint, **options)
++        if matches:
++            release = matches[0]
++        else:
++            try:
++                release = api(f"repos/{self.repository}/releases", method="POST", body={
++                    "tag_name": tag, "target_commitish": "main", "draft": True,
++                    "prerelease": False, "name": tag,
++                    "body": "Immutable offline captures; SQL replay resolves canonical identities."})
++            except Exception:
++                # Reconcile an accepted create whose response was lost. Never
++                # create twice or discard a draft after an ambiguous mutation.
++                found = [value for value in self._inventory() if value.get("tag_name") == tag]
++                if len(found) != 1: raise
++                release = found[0]
+         with TemporaryDirectory(prefix="publish-", dir=self.workspace) as directory:
+-            paths = []
+-            for name, content in files.items():
+-                path = Path(directory) / name
+-                path.write_bytes(content)
+-                paths.append(str(path))
+-            github(self.gh, ["release", "create", tag, *paths, "--repo", self.repository,
+-                "--draft", "--latest=false", "--title", tag, "--notes", "Immutable offline captures; SQL replay resolves canonical identities."])
+-            github(self.gh, ["release", "edit", tag, "--repo", self.repository, "--draft=false", "--latest=false"])
+-        # The CLI publication success is the commit boundary; inventory on the
+-        # next operation independently verifies the exact remote bytes/chain.
+-        return ReleaseCommit(tag, sequence, sha256(files["commit.json"]), manifest, {})
++            published = publish_files(api, self.repository, release, files, directory)
++        return ReleaseCommit(tag, sequence, sha256(files["commit.json"]), manifest, published)
+--- a/src/backtest_data/remote/releases.py
++++ b/src/backtest_data/remote/releases.py
+@@ -5,6 +5,7 @@
+ import re
+ import subprocess
+ import sys
++import time
+ import zipfile
+ from datetime import datetime
+ from uuid import UUID
+@@ -20,19 +21,42 @@
+ MAX_STATE=128*1024**2
+ 
+ 
++class GitHubOperationError(RuntimeError):
++    def __init__(self, status, operation):
++        self.status, self.operation = status, operation
++        super().__init__('github_operation_failed')
++    def safe_details(self):
++        return {'http_status': self.status, 'operation': self.operation}
++
++
++class GitHubAccessError(GitHubOperationError, ValueError):
++    pass
++
++
+ def github(gh, args, *, output=None, timeout=120):
+     options = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+-    if output is None:
+-        r=subprocess.run([str(gh),*args],capture_output=True,timeout=timeout,**options)
+-    else:
+-        with Path(output).open('wb') as f:
+-            r=subprocess.run([str(gh),*args],stdout=f,stderr=subprocess.PIPE,timeout=timeout,**options)
+-    if r.returncode:
+-        failure=(r.stderr or b'').lower()
+-        if any(v in failure for v in (b'http 401',b'http 403',b'authentication',b'permission denied')):
+-            raise ValueError('github_access_requires_action')
+-        raise RuntimeError('github_operation_failed')
+-    return r.stdout if output is None else None
++    method = next((args[i+1] for i, value in enumerate(args[:-1]) if value in {'--method', '-X'}), 'GET')
++    read = args[0] == 'api' and method == 'GET' and not any(value in args for value in ('-f', '-F', '--field', '--raw-field'))
++    operation = 'asset_download' if output is not None else 'runtime_read' if read else 'runtime_write'
++    for attempt in range(4 if read else 1):
++        try:
++            if output is None:
++                r=subprocess.run([str(gh),*args],capture_output=True,timeout=timeout,**options)
++            else:
++                with Path(output).open('wb') as f:
++                    r=subprocess.run([str(gh),*args],stdout=f,stderr=subprocess.PIPE,timeout=timeout,**options)
++        except (subprocess.TimeoutExpired, OSError):
++            error = GitHubOperationError(None, operation)
++        else:
++            if not r.returncode:return r.stdout if output is None else None
++            failure=(r.stderr or b'').lower()
++            match=re.search(rb'http(?:/[\d.]+)?\s+(\d{3})', failure)
++            status=int(match[1]) if match else None
++            if status in {401,403} or any(v in failure for v in (b'authentication',b'permission denied')):
++                raise GitHubAccessError(status, operation)
++            error=GitHubOperationError(status, operation)
++        if not read or error.status not in {None,408,429,500,502,503,504} or attempt==3:raise error
++        time.sleep(2**(attempt+1))
+ 
+ 
+ def release_tag(stream, sequence, *, attempt=None):

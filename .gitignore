@@ -16,4 +16,5 @@ pytest-cache-files-*/
 htmlcov/
 /data/
 /artifacts/
+/recovery/
 .worktrees/

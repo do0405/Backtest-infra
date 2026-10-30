@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 import json
 import os
 import re
-import subprocess
+import time
 from urllib.parse import quote
+
+from offline_publication import GitHubError, github
 
 WORKFLOWS = ('offline-core-refresh.yml', 'remote-data-update.yml')
 CALLERS = {'.github/workflows/' + name for name in (*WORKFLOWS, 'collection-maintenance.yml')}
@@ -15,30 +17,6 @@ OUTCOMES = {'success', 'failure', 'cancelled', 'skipped', 'not_run'}
 RUN_STATES = {'queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'}
 CONCLUSIONS = {None, 'success', 'failure', 'neutral', 'cancelled', 'skipped', 'timed_out',
                'action_required', 'stale', 'startup_failure'}
-
-
-class GitHubError(RuntimeError):
-    def __init__(self, status=None):
-        self.status = status
-        super().__init__('github_maintenance_operation_failed')
-
-
-def github(gh, endpoint, *, method='GET', body=None):
-    command = [gh, 'api', '--method', method, endpoint]
-    content = None
-    if body is not None:
-        command += ['--input', '-']
-        content = json.dumps(body).encode()
-    try:
-        result = subprocess.run(command, input=content, capture_output=True, timeout=30)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise GitHubError() from exc
-    if result.returncode:
-        match = re.search(rb'HTTP (\d{3})', result.stderr)
-        raise GitHubError(int(match[1]) if match else None)
-    if len(result.stdout) > 2 * 1024**2:
-        raise ValueError('bounded_github_response_required')
-    return json.loads(result.stdout) if result.stdout.strip() else None
 
 
 def optional(api, endpoint):
@@ -108,13 +86,18 @@ def release_summary(api, endpoint):
     return {'tag': value['tag'], 'commit_sha256': value['commit_sha256']}
 
 
-def publish_health(api, prefix, branch, health):
+def publish_health(api, prefix, branch, health, *, sleep=time.sleep):
     path = prefix + '/contents/data/offline/collection-health.json'
     content = json.dumps(health, sort_keys=True, indent=2).encode()
     if len(content) > 16 * 1024:
         raise ValueError('bounded_health_snapshot_required')
     for attempt in range(4):
         current = optional(api, path + '?ref=' + quote(branch, safe=''))
+        if current and base64.b64decode(current.get('content', '')) == content:
+            # A failed response may already have committed this exact snapshot.
+            head = api(prefix + '/commits/' + quote(branch, safe=''))
+            if not git_hash(head.get('sha')): raise ValueError('health_commit_readback_required')
+            return head['sha']
         body = {'message': f"Record collection health for run {health['observed_by_run_id']}/{health['run_attempt']}",
                 'branch': branch, 'content': base64.b64encode(content).decode()}
         if current is not None:
@@ -124,8 +107,14 @@ def publish_health(api, prefix, branch, health):
         try:
             response = api(path, method='PUT', body=body)
         except GitHubError as exc:
-            if exc.status not in {409, 422} or attempt == 3:
+            verified = optional(api, path + '?ref=' + quote(branch, safe=''))
+            if verified and base64.b64decode(verified.get('content', '')) == content:
+                head = api(prefix + '/commits/' + quote(branch, safe=''))
+                if not git_hash(head.get('sha')): raise ValueError('health_commit_readback_required')
+                return head['sha']
+            if (exc.status not in {409, 422} and not exc.retryable) or attempt == 3:
                 raise
+            sleep(2 ** (attempt + 1))
             continue
         if not git_hash(response.get('commit', {}).get('sha')):
             raise ValueError('health_commit_readback_required')
@@ -189,5 +178,6 @@ if __name__ == '__main__':
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(json.dumps({'status': 'collection_maintenance_failed', 'error_type': type(exc).__name__}))
+        print(json.dumps({'status': 'collection_maintenance_failed', 'error_type': type(exc).__name__,
+                          **(exc.safe_details() if isinstance(exc, GitHubError) else {})}))
         raise SystemExit(2)
