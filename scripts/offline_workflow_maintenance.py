@@ -13,7 +13,7 @@ from offline_publication import GitHubError, github
 WORKFLOWS = ('offline-core-refresh.yml', 'remote-data-update.yml')
 CALLERS = {'.github/workflows/' + name for name in (*WORKFLOWS, 'collection-maintenance.yml')}
 STATES = {'active', 'disabled_inactivity', 'disabled_manually', 'disabled_fork', 'deleted'}
-OUTCOMES = {'success', 'failure', 'cancelled', 'skipped', 'not_run'}
+OUTCOMES = {'success', 'failure', 'cancelled', 'skipped', 'not_run', 'deferred'}
 RUN_STATES = {'queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'}
 CONCLUSIONS = {None, 'success', 'failure', 'neutral', 'cancelled', 'skipped', 'timed_out',
                'action_required', 'stale', 'startup_failure'}
@@ -174,10 +174,16 @@ def main():
     return 2 if result['requires_user'] else 0
 
 
+def report_failure(exc):
+    deferred = isinstance(exc, GitHubError) and exc.retryable
+    print(json.dumps({'status': 'collection_maintenance_deferred' if deferred else 'collection_maintenance_failed',
+                      'error_type': type(exc).__name__,
+                      **(exc.safe_details() if isinstance(exc, GitHubError) else {})}))
+    return 0 if deferred else 2
+
+
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(json.dumps({'status': 'collection_maintenance_failed', 'error_type': type(exc).__name__,
-                          **(exc.safe_details() if isinstance(exc, GitHubError) else {})}))
-        raise SystemExit(2)
+        raise SystemExit(report_failure(exc))

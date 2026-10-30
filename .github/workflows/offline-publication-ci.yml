@@ -1,0 +1,63 @@
+name: Offline publication recovery verification
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/offline*'
+      - 'scripts/build_offline_runtime.py'
+      - 'tests/unit/test_offline*'
+      - 'tests/runtime/**'
+      - '.github/workflows/offline*'
+  pull_request:
+    paths:
+      - 'scripts/offline*'
+      - 'scripts/build_offline_runtime.py'
+      - 'tests/unit/test_offline*'
+      - 'tests/runtime/**'
+      - '.github/workflows/offline*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Load exactly the pinned runtime without provider credentials
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+          from scripts.offline_runtime_launcher import extract_runtime, runtime_binding
+          pin=runtime_binding({},Path('scripts/offline-runtime.json'))
+          archive=Path(os.environ['RUNNER_TEMP'])/'approved-runtime.zip'
+          url='https://github.com/do0405/Backtest-infra/releases/download/'+pin['runtime_tag']+'/runtime.zip'
+          archive.write_bytes(urllib.request.urlopen(url,timeout=60).read())
+          source=Path(os.environ['RUNNER_TEMP'])/'approved-runtime'
+          extract_runtime(archive,source,pin['runtime_sha256'])
+          with Path(os.environ['GITHUB_ENV']).open('a') as output:
+              output.write('OFFLINE_RUNTIME_SOURCE='+str(source)+'\n')
+          PY
+      - name: Rebuild the pinned runtime from its immutable base
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, subprocess, sys, urllib.request
+          from pathlib import Path
+          directory=Path(os.environ['RUNNER_TEMP'])
+          base=directory/'runtime-v6.zip'
+          base.write_bytes(urllib.request.urlopen('https://github.com/do0405/Backtest-infra/releases/download/offline-core-runtime-v6-20261031/runtime.zip',timeout=60).read())
+          result=directory/'rebuilt-runtime.zip'
+          subprocess.run([sys.executable,'scripts/build_offline_runtime.py','--base',str(base),'--output',str(result)],check=True)
+          pin=json.loads(Path('scripts/offline-runtime.json').read_text())
+          assert hashlib.sha256(result.read_bytes()).hexdigest()==pin['runtime_sha256']
+          PY
+      - name: Install data contract test dependencies
+        run: python -m pip install . pytest==8.4.2
+      - name: Verify HTTP, workflow, pin and maintenance boundaries
+        run: python -B -m pytest tests/unit/test_offline* tests/unit/test_remote_releases.py -q -p no:cacheprovider
+      - name: Verify interruption, fresh-process recovery and malicious packages
+        run: python -B -m pytest tests/runtime -q -p no:cacheprovider

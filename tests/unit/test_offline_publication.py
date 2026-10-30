@@ -133,3 +133,42 @@ def test_write_is_not_blindly_retried():
         m.github('gh', 'repos/a/b/releases/101', method='PATCH', body={'draft': False},
                  run=failed, sleep=lambda _: None)
     assert len(calls) == 1
+
+
+def test_rate_limit_403_respects_server_wait_and_does_not_hide_authentication():
+    m = module()
+    responses = iter([SimpleNamespace(returncode=1,
+        stdout=b'HTTP/2.0 403 Forbidden\r\nRetry-After: 11\r\n\r\n{}', stderr=b'HTTP 403'),
+        SimpleNamespace(returncode=0, stdout=b'{"id":101}', stderr=b'')])
+    waits = []
+    assert m.github('gh', 'repos/a/b/releases/101', run=lambda *a, **k: next(responses), sleep=waits.append) == {'id':101}
+    assert waits == [11]
+
+
+def test_complete_pending_draft_does_not_publish_a_tag(tmp_path):
+    m = module()
+    remote = Remote({'pending.zip': b'exact pending'})
+    remote.error = m.GitHubError
+    result = m.publish_files(remote, 'a/b', remote.release, {'pending.zip': b'exact pending'},
+                             tmp_path, publish=False, commit_name='pending.zip')
+    assert result['draft'] is True
+    assert all(method != 'PATCH' for method, _ in remote.calls)
+
+
+def test_unknown_cli_errors_are_not_silently_deferred():
+    m = module()
+    calls = []
+    def invalid(*a,**k):
+        calls.append(a)
+        return SimpleNamespace(returncode=1,stdout=b'',stderr=b'unknown flag: --invalid')
+    with pytest.raises(m.GitHubError) as caught:
+        m.github('gh','repos/a/b/releases/101',run=invalid,sleep=lambda _:None)
+    assert not caught.value.retryable and len(calls)==1
+    assert caught.value.safe_details()['reason']=='cli_error'
+
+
+def test_missing_cli_is_a_configuration_failure():
+    m = module()
+    def missing(*a,**k):raise FileNotFoundError('gh')
+    with pytest.raises(ValueError,match='cli_unavailable'):
+        m.github('gh','repos/a/b/releases/101',run=missing,sleep=lambda _:None)

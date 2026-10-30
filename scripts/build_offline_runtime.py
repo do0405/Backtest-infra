@@ -1,4 +1,4 @@
-"""Rebuild runtime v6 from the immutable v5 source and reviewed source patch."""
+"""Rebuild runtime v7 from immutable v6 and the reviewed recovery source patch."""
 import argparse
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -7,7 +7,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 import zipfile
 
-BASE_SHA256 = '3de6f41572962f9c3b2270ecd7f96fce7d09dda397fadf9ab94fa06737c6799b'
+BASE_SHA256 = '59cb5541781ec62dd84004b717bd6f4d52fe09135d4d9e210fb058cc8440784f'
 CHANGED = {'scripts/offline_refresh.py', 'src/backtest_data/offline/transport.py',
            'src/backtest_data/remote/releases.py'}
 
@@ -15,8 +15,8 @@ CHANGED = {'scripts/offline_refresh.py', 'src/backtest_data/offline/transport.py
 def build(base, output):
     base, output = Path(base), Path(output).resolve()
     raw = base.read_bytes()
-    if sha256(raw).hexdigest() != BASE_SHA256: raise ValueError('immutable v5 runtime hash required')
-    patch = Path(__file__).with_name('offline-runtime-v6.patch')
+    if sha256(raw).hexdigest() != BASE_SHA256: raise ValueError('immutable v6 runtime hash required')
+    patch = Path(__file__).with_name('offline-runtime-v7.patch')
     names = {line[6:] for line in patch.read_text(encoding='utf-8').splitlines()
              if line.startswith(('--- a/', '+++ b/'))}
     if names != CHANGED: raise ValueError('exact runtime patch scope required')
@@ -35,12 +35,17 @@ def build(base, output):
                     raise ValueError('safe runtime archive required')
             if sum(item.file_size for item in entries) > 256*1024**2: raise ValueError('bounded runtime required')
             source.extractall(directory)
-        subprocess.run(['git', 'apply', '--check', str(patch.resolve())], cwd=directory, check=True)
-        subprocess.run(['git', 'apply', str(patch.resolve())], cwd=directory, check=True)
-        helper = Path(__file__).with_name('offline_publication.py').read_bytes()
-        (directory/'scripts/offline_publication.py').write_bytes(helper)
+        for name in CHANGED:
+            canonical = (directory/name).read_text(encoding='utf-8')
+            (directory/name).write_text(canonical, encoding='utf-8', newline='\n')
+        subprocess.run(['git', '-c', 'core.autocrlf=false', 'apply', '--check', str(patch.resolve())], cwd=directory, check=True)
+        subprocess.run(['git', '-c', 'core.autocrlf=false', 'apply', str(patch.resolve())], cwd=directory, check=True)
+        helpers = ['scripts/offline_publication.py', 'scripts/offline_outbox.py']
+        for name in helpers:
+            helper = Path(__file__).with_name(Path(name).name).read_text(encoding='utf-8').encode('utf-8')
+            (directory/name).write_bytes(helper)
         with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as target:
-            for name in sorted([item.filename for item in entries] + ['scripts/offline_publication.py']):
+            for name in sorted({item.filename for item in entries} | set(helpers)):
                 info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
                 info.create_system = 0  # Keep ZIP metadata identical across Windows and Linux.
                 info.compress_type = zipfile.ZIP_DEFLATED

@@ -1,0 +1,204 @@
+--- a/scripts/offline_refresh.py
++++ b/scripts/offline_refresh.py
+@@ -18,6 +18,7 @@
+ from backtest_data.credentials import load_credentials
+ from backtest_data.remote.releases import github
+ from offline_publication import GitHubError
++from offline_outbox import recover, acknowledge, remove_local, output
+ 
+ 
+ def publish_index(gh, repo, commit, state, work):
+@@ -56,7 +57,7 @@
+ 
+ 
+ def main():
+-    started=time.monotonic(); parser=argparse.ArgumentParser(description=__doc__)
++    parser=argparse.ArgumentParser(description=__doc__)
+     parser.add_argument('--work',type=Path,required=True); parser.add_argument('--budget-seconds',type=int,default=5400)
+     args=parser.parse_args()
+     if not 60<=args.budget_seconds<=5400:raise ValueError('bounded capture run with export margin required')
+@@ -74,12 +75,21 @@
+     if catalog_hash!=configuration['catalog_sha256']:raise ValueError('catalog identity hash mismatch')
+     catalog=decode(content); catalog['catalog_sha256']=catalog_hash
+     transport=GitHubCaptureTransport(repo,gh=gh,workspace=args.work/'transport',stream=configuration['stream_id'],catalog_sha256=catalog_hash)
+-    state=transport.load_latest_state() or None
++    recovered=recover(transport,on_commit=lambda commit,state:publish_index(gh,repo,commit,state,args.work),include_artifacts=True)
++    verified=transport.load_latest_verified_state()
++    state=verified[1] if verified else None
++    if verified:publish_index(gh,repo,verified[0],state,args.work)
++    if recovered:
++        output(publication_state='recovered')
++        print(json.dumps({'status':'offline_pending_recovered','tags':[commit.tag for commit in recovered],
++                          'new_provider_requests':0,'coverage_complete':False}),flush=True)
++        return
+     budget=reserve_hosted(gh,repo,stream=configuration['stream_id'],catalog_sha256=catalog_hash,
+         run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
+         work=args.work/'quota',now=datetime.now(timezone.utc))
+     if configuration.get('dart_not_before') and datetime.now(timezone.utc)<datetime.fromisoformat(configuration['dart_not_before']):
+         budget.remaining['opendart']=0
++    started=time.monotonic()
+     http=CaptureHTTP(budget,deadline=started+args.budget_seconds)
+     try:
+         credentials=load_credentials(sources=['alpaca','sec','opendart']); client=NativeClients(http,credentials)
+@@ -96,6 +106,10 @@
+         updated['used_calls']=budget.used
+         commit=transport.publish(build_bundles(captures),updated)
+         publish_index(gh,repo,commit,updated,args.work)
++        pending,files=transport.pending_publication
++        if acknowledge(transport,pending,commit,files):remove_local(transport,pending)
++        else:output(pending_cleanup='deferred')
++        output(publication_state='committed')
+         print(json.dumps({'status':'offline_capture_committed','tag':commit.tag,'captures':len(captures),
+             'used_calls':budget.used,'provider_status':updated['provider_status'],'coverage_complete':False}))
+     finally:http.close()
+@@ -104,6 +118,8 @@
+ if __name__=='__main__':
+     try:main()
+     except Exception as exc:
+-        print(json.dumps({'status':'offline_capture_failed','error_type':type(exc).__name__,
++        deferred=getattr(exc,'retryable',False)
++        output(publication_state='deferred' if deferred else 'failed')
++        print(json.dumps({'status':'offline_publication_deferred' if deferred else 'offline_capture_failed','error_type':type(exc).__name__,
+                           **(exc.safe_details() if hasattr(exc,'safe_details') else {})}),flush=True)
+-        raise SystemExit(2)
++        raise SystemExit(0 if deferred else 2)
+--- a/src/backtest_data/offline/transport.py
++++ b/src/backtest_data/offline/transport.py
+@@ -136,10 +136,30 @@
+         self.workspace.mkdir(parents=True, exist_ok=True)
+ 
+     def _inventory(self):
++        cached = getattr(self, '_release_inventory', None)
++        if cached is not None: return cached
+         pages = decode(github(self.gh, ["api", "--paginate", "--slurp", f"repos/{self.repository}/releases?per_page=100"]))
+         if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+             raise ValueError("paginated GitHub release inventory required")
+-        return [release for page in pages for release in page]
++        self._release_inventory = [release for page in pages for release in page]
++        return self._release_inventory
++
++    def _refresh_inventory(self):
++        self._release_inventory = None
++        self.__dict__.pop('_ordered_release_inventory', None)
++        return self._inventory()
++
++    def _remember_release(self, release):
++        cached = getattr(self, '_release_inventory', None)
++        if cached is not None:
++            self._release_inventory = [value for value in cached if value['id'] != release['id']] + [release]
++        self.__dict__.pop('_ordered_release_inventory', None)
++
++    def _forget_release(self, identity):
++        cached = getattr(self, '_release_inventory', None)
++        if cached is not None:
++            self._release_inventory = [value for value in cached if value['id'] != identity]
++        self.__dict__.pop('_ordered_release_inventory', None)
+ 
+     def _download(self, release, name, directory, *, bound, record=None):
+         assets = [asset for asset in release.get("assets", []) if asset.get("name") == name]
+@@ -312,31 +332,40 @@
+                 yield items
+ 
+     def publish(self, bundles, state):
+-        from offline_publication import github as safe_github, publish_files
+         previous = self.last_committed()
+         sequence = previous.sequence + 1 if previous else 1
+         manifest, files = prepare_release(bundles, state, stream=self.stream,
+             catalog_sha256=self.catalog_sha256, sequence=sequence, previous=previous)
+-        tag = release_tag(self.stream, sequence)
+-        # Preserve partial drafts. Matching uploaded bytes are reused; a
+-        # conflicting checkpoint requires recovery instead of deleting captures.
+-        matches = [release for release in self._inventory() if release.get("tag_name") == tag]
+-        if len(matches) > 1: raise ValueError("unique pending release required")
++        return self.publish_prepared(manifest, files)
++
++    def publish_prepared(self, manifest, files, *, persist=True):
++        from offline_publication import github as safe_github, publish_files, _verify
++        from offline_outbox import validate, persist as persist_pending, ensure_release
++        checked, _ = validate(files, stream=self.stream, catalog_sha256=self.catalog_sha256)
++        if checked != manifest: raise ValueError("exact saved publication required")
++        tag = release_tag(self.stream, manifest['sequence'])
++        previous = self.last_committed()
++        if previous and manifest['sequence'] <= previous.sequence:
++            matches = [r for r in self._inventory() if r.get('tag_name') == tag and not r.get('draft')]
++            if len(matches) != 1: raise ValueError("committed pending predecessor missing")
++            committed = self._read_release(manifest['sequence'], matches[0])
++            if committed.sha256 != sha256(files['commit.json']): raise ValueError("conflicting committed pending publication")
++            if _verify(committed.release, committed.release, files, published=True) != set(files):
++                raise ValueError("complete committed publication required")
++            return committed
++        if (manifest['sequence'] != (previous.sequence + 1 if previous else 1) or
++                manifest['previous_tag'] != (previous.tag if previous else None) or
++                manifest['previous_commit_sha256'] != (previous.sha256 if previous else None)):
++            raise ValueError("saved publication predecessor mismatch")
++        existing = [r for r in self._inventory() if r.get('tag_name') == tag]
++        if len(existing) > 1: raise ValueError('unique canonical draft required')
++        if existing: _verify(existing[0], existing[0], files)
++        if persist:
++            pending_release = persist_pending(self, manifest, files)
++            self.pending_publication = (pending_release, files)
+         api = lambda endpoint, **options: safe_github(self.gh, endpoint, **options)
+-        if matches:
+-            release = matches[0]
+-        else:
+-            try:
+-                release = api(f"repos/{self.repository}/releases", method="POST", body={
+-                    "tag_name": tag, "target_commitish": "main", "draft": True,
+-                    "prerelease": False, "name": tag,
+-                    "body": "Immutable offline captures; SQL replay resolves canonical identities."})
+-            except Exception:
+-                # Reconcile an accepted create whose response was lost. Never
+-                # create twice or discard a draft after an ambiguous mutation.
+-                found = [value for value in self._inventory() if value.get("tag_name") == tag]
+-                if len(found) != 1: raise
+-                release = found[0]
++        release = ensure_release(self, tag, "Immutable offline captures; SQL replay resolves canonical identities.")
+         with TemporaryDirectory(prefix="publish-", dir=self.workspace) as directory:
+             published = publish_files(api, self.repository, release, files, directory)
+-        return ReleaseCommit(tag, sequence, sha256(files["commit.json"]), manifest, published)
++        self._remember_release(published)
++        return ReleaseCommit(tag, manifest['sequence'], sha256(files["commit.json"]), manifest, published)
+--- a/src/backtest_data/remote/releases.py
++++ b/src/backtest_data/remote/releases.py
+@@ -22,11 +22,16 @@
+ 
+ 
+ class GitHubOperationError(RuntimeError):
+-    def __init__(self, status, operation):
++    def __init__(self, status, operation, rate_limited=False, transient=False):
+         self.status, self.operation = status, operation
++        self.rate_limited = rate_limited
++        self.transient = transient
+         super().__init__('github_operation_failed')
+     def safe_details(self):
+         return {'http_status': self.status, 'operation': self.operation}
++    @property
++    def retryable(self):
++        return self.transient or self.rate_limited or self.status in {408,429,500,502,503,504}
+ 
+ 
+ class GitHubAccessError(GitHubOperationError, ValueError):
+@@ -45,16 +50,20 @@
+             else:
+                 with Path(output).open('wb') as f:
+                     r=subprocess.run([str(gh),*args],stdout=f,stderr=subprocess.PIPE,timeout=timeout,**options)
++        except (FileNotFoundError, PermissionError) as exc:
++            raise ValueError('github_cli_unavailable') from exc
+         except (subprocess.TimeoutExpired, OSError):
+-            error = GitHubOperationError(None, operation)
++            error = GitHubOperationError(None, operation, transient=True)
+         else:
+             if not r.returncode:return r.stdout if output is None else None
+             failure=(r.stderr or b'').lower()
+             match=re.search(rb'http(?:/[\d.]+)?\s+(\d{3})', failure)
+             status=int(match[1]) if match else None
+-            if status in {401,403} or any(v in failure for v in (b'authentication',b'permission denied')):
++            limited=status==403 and b'rate limit' in failure
++            if (status in {401,403} and not limited) or any(v in failure for v in (b'authentication',b'permission denied')):
+                 raise GitHubAccessError(status, operation)
+-            error=GitHubOperationError(status, operation)
++            from offline_publication import network_failure
++            error=GitHubOperationError(status, operation, limited, status is None and network_failure(r.stderr))
+         if not read or error.status not in {None,408,429,500,502,503,504} or attempt==3:raise error
+         time.sleep(2**(attempt+1))
+ 

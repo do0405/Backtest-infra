@@ -62,3 +62,11 @@ def test_health_conflict_refreshes_sha_and_keeps_unrelated_files(monkeypatch):
     assert m.publish_health(api, 'repos/a/b', 'main', {'observed_by_run_id': 101, 'run_attempt': 1}, sleep=lambda _: None) == 'c' * 40
     assert writes[0][1]['sha'] == 'a' * 40 and writes[1][1]['sha'] == 'b' * 40
     assert {endpoint for endpoint, _ in writes} == {'repos/a/b/contents/data/offline/collection-health.json'}
+
+
+def test_temporary_maintenance_outage_is_deferred_but_authentication_remains_actionable(monkeypatch,capsys):
+    m=module(monkeypatch)
+    assert m.report_failure(m.GitHubError(503,'repository_write'))==0
+    assert json.loads(capsys.readouterr().out)['status']=='collection_maintenance_deferred'
+    assert m.report_failure(m.GitHubError(403,'repository_write'))==2
+    assert json.loads(capsys.readouterr().out)['status']=='collection_maintenance_failed'

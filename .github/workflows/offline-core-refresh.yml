@@ -26,6 +26,11 @@ jobs:
     if: vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && github.event.repository.private == false && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      publication_state: ${{ steps.capture.outputs.publication_state }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -34,6 +39,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Collect independently and publish durable checkpoint
+        id: capture
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -47,6 +53,15 @@ jobs:
           BUDGET_SECONDS: ${{ inputs.budget_seconds || '5400' }}
           QUALIFY_SEC: ${{ inputs.qualify_sec && 'true' || 'false' }}
         run: python scripts/offline_runtime_launcher.py
+      - name: Preserve pending delta if publication is deferred or interrupted
+        if: always() && (steps.capture.outcome != 'success' || steps.capture.outputs.publication_state == 'deferred' || steps.capture.outputs.pending_cleanup == 'deferred')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offline-core-pending-v1-s${{ steps.capture.outputs.pending_sequence }}-h${{ steps.capture.outputs.pending_sha256 }}-r${{ github.run_id }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/offline-isolated-runtime/capture/pending.zip
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 90
   maintain:
     needs: refresh
     if: always() && vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && github.event.repository.private == false && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
@@ -68,7 +83,7 @@ jobs:
       - name: Preserve repository health even after acquisition failure
         env:
           GH_TOKEN: ${{ github.token }}
-          COLLECTION_OUTCOME: ${{ needs.refresh.result }}
+          COLLECTION_OUTCOME: ${{ needs.refresh.outputs.publication_state == 'deferred' && 'deferred' || needs.refresh.result }}
           CORE_COLLECTION_ALLOWED: 'true'
           KRX_COLLECTION_ALLOWED: ${{ vars.REMOTE_PIPELINE_ENABLED == 'true' && vars.REMOTE_FREE_BUDGET_APPROVED == 'true' && vars.REMOTE_IDENTITY_HANDOFF_READY == 'true' && vars.REMOTE_DATA_PUBLIC_ALLOWED == 'true' && 'true' || 'false' }}
         run: python scripts/offline_workflow_maintenance.py

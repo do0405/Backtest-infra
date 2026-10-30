@@ -46,6 +46,10 @@ class Remote:
 
 
 def prepared(tmp_path, monkeypatch, remote):
+    import offline_outbox
+    # Isolate canonical publication here; the full durable restart path has its
+    # own real-bundle regression tests in test_offline_outbox.py.
+    monkeypatch.setattr(offline_outbox, 'persist', lambda *args: None)
     monkeypatch.setattr(publication, 'github', remote)
     value = transport.GitHubCaptureTransport('a/b', workspace=tmp_path, catalog_sha256='a'*64)
     monkeypatch.setattr(value, 'last_committed', lambda: None)
