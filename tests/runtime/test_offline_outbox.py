@@ -223,7 +223,8 @@ def test_recovery_precedes_provider_credentials_and_credit_reservation(tmp_path,
     assert order == ['recovered','index']
 
 
-def test_fallback_provenance_and_digest_are_checked_before_restoring(tmp_path, monkeypatch):
+@pytest.mark.parametrize('legacy_empty_hash',[False,True])
+def test_fallback_provenance_and_digest_are_checked_before_restoring(tmp_path, monkeypatch,legacy_empty_hash):
     from backtest_data.remote import releases
     manifest, files, _ = publication_files()
     package = outbox.pack(files,tmp_path/'pending.zip')
@@ -235,6 +236,7 @@ def test_fallback_provenance_and_digest_are_checked_before_restoring(tmp_path, m
     artifact = {'id':8,'name':'offline-core-pending-v1-s000000001-h'+sha256(files['commit.json']).hexdigest()+'-r7-a1',
                 'expired':False,'size_in_bytes':len(raw),'digest':'sha256:'+sha256(raw).hexdigest(),
                 'workflow_run':{'id':7,'repository_id':11,'head_repository_id':11,'head_branch':'main','head_sha':'c'*40}}
+    if legacy_empty_hash:artifact['name']=artifact['name'].replace(sha256(files['commit.json']).hexdigest(),'')
     monkeypatch.setattr(publication,'github',lambda gh,url,**k: {'artifacts':[artifact]} if '/artifacts?' in url else run)
     monkeypatch.setattr(releases,'github',lambda gh,args,output,**k: Path(output).write_bytes(raw))
     value = transport.GitHubCaptureTransport('a/b',workspace=tmp_path/'transport',catalog_sha256='a'*64)
@@ -244,3 +246,15 @@ def test_fallback_provenance_and_digest_are_checked_before_restoring(tmp_path, m
     with pytest.raises(ValueError,match='digest'):outbox.artifact_packages(value,[])
     artifact['workflow_run']['head_repository_id']=99
     assert outbox.artifact_packages(value,[])==[]
+
+
+def test_workflow_outputs_accept_sha256_and_validate_without_actions_environment(tmp_path,monkeypatch):
+    path=tmp_path/'outputs'
+    monkeypatch.setenv('GITHUB_OUTPUT',str(path))
+    outbox.output(pending_sequence='000000103',pending_sha256='a'*64)
+    before=path.read_text()
+    assert 'pending_sha256='+'a'*64 in before
+    with pytest.raises(ValueError):outbox.output(publication_state='committed',**{'invalid\nkey':'bad'})
+    assert path.read_text()==before
+    monkeypatch.delenv('GITHUB_OUTPUT')
+    with pytest.raises(ValueError):outbox.output(**{'invalid\nkey':'bad'})

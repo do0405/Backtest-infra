@@ -19,12 +19,13 @@ FIELDS = {'format', 'stream_id', 'catalog_sha256', 'sequence', 'commit_sha256',
 
 
 def output(**values):
+    for key, value in values.items():
+        if not re.fullmatch(r'[a-z_][a-z0-9_]*', key) or not re.fullmatch(r'[a-z0-9_]+', str(value)):
+            raise ValueError('safe workflow output required')
     path = os.environ.get('GITHUB_OUTPUT')
     if path:
         with Path(path).open('a', encoding='utf-8') as target:
             for key, value in values.items():
-                if not re.fullmatch(r'[a-z_]+', key) or not re.fullmatch(r'[a-z0-9_]+', str(value)):
-                    raise ValueError('safe workflow output required')
                 target.write(f'{key}={value}\n')
 
 
@@ -173,7 +174,10 @@ def artifact_packages(transport, inventory):
     from backtest_data.remote.releases import github as download
     api = lambda endpoint, **options: publication.github(transport.gh, endpoint, **options)
     prefix = f'repos/{transport.repository}'
-    pattern = re.compile(r'offline-core-pending-v1-s(\d{9})-h([a-f0-9]{64})-r(\d+)-a(\d+)$')
+    # v7 could save the correct package before rejecting its sha256 workflow
+    # output name. Its authenticated fallback has an empty hash suffix; verify
+    # the full artifact/package before recovering that legacy form.
+    pattern = re.compile(r'offline-core-pending-v1-s(\d{9})-h([a-f0-9]{64})?-r(\d+)-a(\d+)$')
     packages = []
     for page in range(1, 101):
         artifacts = api(prefix+f'/actions/artifacts?per_page=100&page={page}')['artifacts']
@@ -183,7 +187,7 @@ def artifact_packages(transport, inventory):
             sequence, digest, run_id, attempt = int(match[1]), match[2], int(match[3]), int(match[4])
             tag = f'offline-{transport.stream}-{sequence:09d}'
             committed = next((r for r in inventory if r.get('tag_name') == tag and not r.get('draft')), None)
-            if committed and any(a.get('name') == 'commit.json' and a.get('digest') == 'sha256:'+digest
+            if digest and committed and any(a.get('name') == 'commit.json' and a.get('digest') == 'sha256:'+digest
                                  for a in committed.get('assets', [])):
                 continue
             origin = artifact.get('workflow_run', {})
@@ -217,8 +221,12 @@ def artifact_packages(transport, inventory):
                     raise ValueError('single bounded fallback pending file required')
                 package = archive.read('pending.zip')
             manifest, files, state = unpack(package, stream=transport.stream, catalog_sha256=transport.catalog_sha256)
-            if manifest['sequence'] != sequence or sha256(files['commit.json']).hexdigest() != digest:
+            actual_digest = sha256(files['commit.json']).hexdigest()
+            if manifest['sequence'] != sequence or digest and actual_digest != digest:
                 raise ValueError('fallback artifact commit binding mismatch')
+            if committed and any(a.get('name') == 'commit.json' and a.get('digest') == 'sha256:'+actual_digest
+                                 for a in committed.get('assets', [])):
+                continue
             packages.append((manifest, files, state, package))
         if len(artifacts) < 100: break
     else: raise ValueError('bounded fallback inventory exceeded')

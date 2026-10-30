@@ -1,5 +1,5 @@
 {
   "format": "offline_runtime_pin_v1",
-  "runtime_tag": "offline-core-runtime-v7-20261031",
-  "runtime_sha256": "85e0455f996909496d3e01f27efe87d420aef10ab3f912fa1980b7b8c9123bc1"
+  "runtime_tag": "offline-core-runtime-v8-20261031",
+  "runtime_sha256": "e655addd116039cc56a84064dda433c36b0bd2099e2fba1638c60bba93e80004"
 }

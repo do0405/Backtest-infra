@@ -1,4 +1,4 @@
-"""Rebuild runtime v7 from immutable v6 and the reviewed recovery source patch."""
+"""Rebuild runtime v8 from immutable v6 and the reviewed recovery source patch."""
 import argparse
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
