@@ -1,6 +1,6 @@
 {
   "catalog_sha256": "c44fbc9cef2b0eb036a1328a7a10e09665842b17045baf7f1c209f35a40ccabb",
-  "commit_sha256": "c8351449f7775809b20b58cdce63e2256d9b8f44670c898bde663b75863d9064",
+  "commit_sha256": "e8ac5b9719c1f203bc9fc184a28b940396480bffca1868fb4f7328ad1066821e",
   "coverage_complete": false,
   "format": "offline_source_index_v1",
   "provider_status": {
@@ -12,8 +12,9 @@
       "status": "captured"
     },
     "sec": {
-      "captures": 0,
-      "status": "captured"
+      "code": "remote_budget_deferred",
+      "error_type": "ProviderError",
+      "status": "deferred"
     }
   },
   "source_watermarks": {
@@ -22,5 +23,5 @@
     "sec": "2026-10-30"
   },
   "stream_id": "core-forward-v1",
-  "tag": "offline-core-forward-v1-000000111"
+  "tag": "offline-core-forward-v1-000000112"
 }
