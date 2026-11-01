@@ -1,15 +1,15 @@
 {
-  "checked_at": "2026-11-01T14:49:13.278215+00:00",
+  "checked_at": "2026-11-01T19:37:10.048445+00:00",
   "collection_outcome": "success",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "56c77102f9b1b0d0d918065acb50aeca21419b8b",
+  "head_sha": "321ed6e19ee819fc82be53d33187e50c6eb42c14",
   "latest_data_release": {
-    "commit_sha256": "e8ac5b9719c1f203bc9fc184a28b940396480bffca1868fb4f7328ad1066821e",
-    "tag": "offline-core-forward-v1-000000112"
+    "commit_sha256": "3412a1ba682afe950e59a2d0babf395444b569acea7ce8bfe0e5542118770be6",
+    "tag": "offline-core-forward-v1-000000113"
   },
-  "observed_by_run_id": 41310532916,
+  "observed_by_run_id": 41338982286,
   "requires_user": false,
   "run_attempt": 1,
   "workflows": {
@@ -17,8 +17,8 @@
       "attention": null,
       "latest_observed_schedule": {
         "conclusion": null,
-        "created_at": "2026-11-01T13:17:23Z",
-        "id": 41310532916,
+        "created_at": "2026-11-01T18:54:18Z",
+        "id": 41338982286,
         "status": "in_progress"
       },
       "operator_enabled": true,
