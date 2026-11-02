@@ -1,26 +1,29 @@
 {
   "catalog_sha256": "c44fbc9cef2b0eb036a1328a7a10e09665842b17045baf7f1c209f35a40ccabb",
-  "commit_sha256": "b8d1eafff2634e9badcc7c2e0de2fafe0450854b662acdb1852e12df8e20df95",
+  "commit_sha256": "85cfc01bafc8567f3a5637d704d4aeb932035c66647d5a8de7b365ed75f31ba7",
   "coverage_complete": false,
   "format": "offline_source_index_v1",
   "provider_status": {
     "alpaca": {
-      "status": "manifest_deferred"
+      "code": "remote_budget_deferred",
+      "error_type": "ProviderError",
+      "status": "deferred"
     },
     "opendart": {
       "captures": 0,
       "status": "captured"
     },
     "sec": {
-      "captures": 0,
-      "status": "captured"
+      "code": "remote_budget_deferred",
+      "error_type": "ProviderError",
+      "status": "deferred"
     }
   },
   "source_watermarks": {
-    "alpaca": "2026-10-29",
+    "alpaca": "2026-10-30",
     "opendart": "2026-11-01",
     "sec": "2026-10-31"
   },
   "stream_id": "core-forward-v1",
-  "tag": "offline-core-forward-v1-000000115"
+  "tag": "offline-core-forward-v1-000000116"
 }
