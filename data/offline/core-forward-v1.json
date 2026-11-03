@@ -1,6 +1,6 @@
 {
   "catalog_sha256": "c44fbc9cef2b0eb036a1328a7a10e09665842b17045baf7f1c209f35a40ccabb",
-  "commit_sha256": "ebfd50ca313f7764ac349b5d4561472b832dbc6e2bc577a9abdac52ccd2e565d",
+  "commit_sha256": "31dcccd87de88d3fa44b894e9cba3c43184ea691c26faddfbb1dab7796fc31b1",
   "coverage_complete": false,
   "format": "offline_source_index_v1",
   "provider_status": {
@@ -13,16 +13,16 @@
       "status": "captured"
     },
     "sec": {
-      "code": "temporary_transport_error",
+      "code": "remote_budget_deferred",
       "error_type": "ProviderError",
       "status": "deferred"
     }
   },
   "source_watermarks": {
     "alpaca": "2026-10-30",
-    "opendart": "2026-11-01",
+    "opendart": "2026-11-02",
     "sec": "2026-10-31"
   },
   "stream_id": "core-forward-v1",
-  "tag": "offline-core-forward-v1-000000117"
+  "tag": "offline-core-forward-v1-000000118"
 }
