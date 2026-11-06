@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path,PurePosixPath
+import shutil
 import stat
 import subprocess
 import sys
@@ -18,13 +19,20 @@ def command(arguments,**kwargs):
 def main():
     config=json.loads(os.environ['REMOTE_EXTENDED_OWNERSHIP']);repo=os.environ['REPOSITORY']
     root=Path(os.environ['RUNNER_TEMP'])/'extra-isolated-runtime';root.mkdir()
+    real_gh=shutil.which('gh')
+    if real_gh is None:raise RuntimeError('GitHub CLI required')
+    bin_dir=root/'bin';bin_dir.mkdir()
+    gh=bin_dir/'gh'
+    shutil.copyfile(Path(__file__).with_name('retry_release_asset.py'),gh)
+    gh.chmod(0o700)
+    env={**os.environ,'BACKTEST_REAL_GH':real_gh,'PATH':str(bin_dir)+os.pathsep+os.environ['PATH']}
     release=json.loads(command(['gh','api',f"repos/{repo}/releases/tags/{config['runtime_tag']}"]))
     assets=[row for row in release.get('assets',[]) if row['name']=='runtime.zip']
     if release.get('draft') or len(assets)!=1 or not 0<assets[0]['size']<64*1024**2:raise ValueError('bounded committed extra runtime required')
     archive=root/'runtime.zip'
     with archive.open('xb') as output:
         result=subprocess.run(['gh','api','-H','Accept: application/octet-stream',f"repos/{repo}/releases/assets/{assets[0]['id']}"],
-            stdout=output,stderr=subprocess.PIPE,timeout=300)
+            stdout=output,env=env,timeout=300)
     if result.returncode or sha256(archive.read_bytes()).hexdigest()!=config['runtime_sha256']:raise ValueError('exact approved extra runtime hash required')
     runtime=root/'source';runtime.mkdir()
     with zipfile.ZipFile(archive) as source:
@@ -43,7 +51,7 @@ def main():
     command([sys.executable,'-m','pip','check'])
     command([sys.executable,'-m','alembic','upgrade','head'],cwd=runtime)
     return subprocess.run([sys.executable,str(runtime/'scripts/remote_extended_cycle.py'),'--work',str(root/'capture'),
-        '--budget-seconds',os.environ.get('BUDGET_SECONDS','4800')],cwd=runtime).returncode
+        '--budget-seconds',os.environ.get('BUDGET_SECONDS','4800')],cwd=runtime,env=env).returncode
 
 
 if __name__=='__main__':
