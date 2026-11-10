@@ -10,8 +10,9 @@ import sys
 import zipfile
 
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
-ARCHIVE_SOURCE_SHA256='a244ccda6fdb0eb877d5f524b3288c92c17a21968ed035d1a1f14b9dcb74c8c6'
-ARCHIVE_PATCH_SHA256='366425da1c4ee4f1184380b9aeae8b934c87c98fc756dfc802c9e197574e96b8'
+ARCHIVE_SOURCE_SHA256='9b04fe116a4becfcd7961d089f778b20fae6953622c375a99ca16ffcd07c5357'
+CYCLE_SOURCE_SHA256='1a82b2f4842d10ab78ac7e25f24fa40804126f9c652b39c523ba82416df3c4c7'
+ARCHIVE_PATCH_SHA256='26fcf49a7d470ba7a8b7a4455ffaaf5405b68a2e252a4dfd3ef041aaaa56e948'
 
 
 def command(arguments,**kwargs):
@@ -25,16 +26,21 @@ def apply_task_archive_overlay(runtime,base_sha256):
     patch=Path(__file__).with_name('extra-task-archive-v9.patch').resolve()
     if sha256(patch.read_bytes()).hexdigest()!=ARCHIVE_PATCH_SHA256:
         raise ValueError('exact sharded task archive patch required')
-    source=runtime/'src/backtest_data/remote/task_archive.py'
-    canonical=source.read_text(encoding='utf-8')
-    source.write_text(canonical,encoding='utf-8',newline='\n')
+    sources={
+        runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
+        runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
+    }
+    for source in sources:
+        canonical=source.read_text(encoding='utf-8')
+        source.write_text(canonical,encoding='utf-8',newline='\n')
     arguments=['git','-c','core.autocrlf=false','apply']
     command([*arguments,'--check',str(patch)],cwd=runtime)
     command([*arguments,str(patch)],cwd=runtime)
-    if sha256(source.read_bytes()).hexdigest()!=ARCHIVE_SOURCE_SHA256:
-        raise ValueError('exact sharded task archive source hash required')
+    if any(sha256(source.read_bytes()).hexdigest()!=expected for source,expected in sources.items()):
+        raise ValueError('exact task archive and cycle source hashes required')
     print(json.dumps({'status':'extra_task_archive_overlay_applied',
-                      'base_runtime_sha256':base_sha256,'archive_source_sha256':ARCHIVE_SOURCE_SHA256}),flush=True)
+                      'base_runtime_sha256':base_sha256,'archive_source_sha256':ARCHIVE_SOURCE_SHA256,
+                      'cycle_source_sha256':CYCLE_SOURCE_SHA256}),flush=True)
 
 
 def main():
