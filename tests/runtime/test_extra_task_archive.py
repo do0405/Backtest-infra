@@ -93,3 +93,42 @@ def test_shard_manifest_cannot_reorder_records(archive, binding, tmp_path, monke
     checkpoint['task_state_archive']['shards'].reverse()
     with pytest.raises(ValueError, match='reference required'):
         archive.hydrate_checkpoint(checkpoint, tmp_path, binding=binding)
+
+
+def test_external_archive_reuses_unchanged_shards_and_restores_without_resume_zip(
+        archive, binding, tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, 'MAX_SHARD_EXPANDED_BYTES', 550)
+    key = b'k' * 32
+    tag = 'data-extra-forward-v1-000000684-r42-a1'
+    original = state()
+    source = tmp_path / 'source'
+    detached = archive.detach_checkpoint(original, source, binding=binding)
+    ref = detached['task_state_archive']
+    index, uploads = archive.publishable_shards(ref, source, tmp_path / 'encrypted', binding=binding,
+                                              tag=tag, key=key)
+    assert len(uploads) == len(ref['shards']) > 1
+    files = {(tag, asset.name): asset for asset in uploads}
+    restored = tmp_path / 'external'
+    archive.restore_shards(ref, index, restored, binding=binding, key=key,
+                           fetch=lambda release, asset, size: files[release, asset])
+    assert archive.hydrate_checkpoint(detached, restored, binding=binding) == original
+
+    next_binding = dict(binding, start_sequence=685)
+    next_source = tmp_path / 'next'
+    next_ref = archive.detach_checkpoint(original, next_source, binding=next_binding)['task_state_archive']
+    next_index, new_uploads = archive.publishable_shards(
+        next_ref, next_source, tmp_path / 'next-encrypted', binding=next_binding,
+        tag='data-extra-forward-v1-000000685-r43-a1', key=key, previous=(ref, index))
+    assert len(new_uploads) == 1
+    assert all(next_index[shard['path']]['tag'] == tag for shard in next_ref['shards'][1:])
+
+
+def test_external_archive_rejects_bad_asset_before_fetch(archive, binding, tmp_path):
+    source = tmp_path / 'source'
+    ref = archive.detach_checkpoint(state(), source, binding=binding)['task_state_archive']
+    index, _ = archive.publishable_shards(ref, source, tmp_path / 'assets', binding=binding,
+        tag='data-extra-forward-v1-000000684-r42-a1', key=b'k' * 32)
+    index[ref['shards'][0]['path']]['asset'] = '../private'
+    with pytest.raises(ValueError, match='external task archive'):
+        archive.restore_shards(ref, index, tmp_path / 'resume', binding=binding, key=b'k' * 32,
+                               fetch=lambda *args: pytest.fail('invalid asset fetched'))

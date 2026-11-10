@@ -1,6 +1,6 @@
 --- a/src/backtest_data/remote/task_archive.py
 +++ b/src/backtest_data/remote/task_archive.py
-@@ -1,8 +1,10 @@
+@@ -1,15 +1,22 @@
  """Lossless task metadata in the existing encrypted resume ZIP; no SQL rows."""
  from collections import Counter
 +from contextlib import ExitStack
@@ -11,7 +11,8 @@
  from uuid import UUID
  from .codec import dumps,loads
  from .checkpoint import runtime_task
-@@ -10,6 +12,10 @@
+ from .bundle import safe_path,MAX_BUNDLE_BYTES
++from .encrypted import HEADER, decrypt_file, encrypt_file
  
  PATH='heads/task-state/metadata.json.gz'
  FORMAT='backtest_portable_task_state_ndjson_v1'
@@ -22,7 +23,7 @@
  FIELDS=('task_state','completed_task_ids','unfinished_task_ids','price_history_queue')
  MAX_LINE_BYTES=1024*1024
  MAX_EXPANDED_BYTES=1024**3
-@@ -46,17 +52,39 @@
+@@ -46,17 +53,38 @@
          raise ValueError('original task outside archive source scope')
      dumps(value)
  
@@ -61,15 +62,14 @@
 +    if value['format']==SHARDED_FORMAT and value.keys()==common|{'shards'}:
 +        members=value['shards']
 +        if (isinstance(members,list) and 0<len(members)<=MAX_SHARDS
-+            and all(_member(item,_shard_path(index),MAX_SHARD_EXPANDED_BYTES) for index,item in enumerate(members))
-+            and sum(item['bytes'] for item in members)<=MAX_BUNDLE_BYTES):
++            and all(_member(item,_shard_path(index),MAX_SHARD_EXPANDED_BYTES) for index,item in enumerate(members))):
 +            return members
 +    raise ValueError('bounded exact task archive reference required')
 +
  
  def _digest(path):
      value=hashlib.sha256()
-@@ -67,19 +95,37 @@
+@@ -67,19 +95,43 @@
  def detach_checkpoint(checkpoint,root,*,binding):
      binding=deepcopy(_binding(binding))
      if 'task_state_archive' in checkpoint:raise ValueError('hydrate task archive before replacing its authority')
@@ -89,7 +89,11 @@
 +        member=None;size=0;output=None
 +
 +        def finish_shard():
++            nonlocal output
++            if output is None:
++                return
 +            files.close()
++            output=None
 +            members.append(dict(path=_shard_path(len(members)),bytes=member.stat().st_size,
 +                                expanded_bytes=size,sha256=_digest(member)))
 +
@@ -102,7 +106,7 @@
 +            if len(wire)>min(MAX_LINE_BYTES,MAX_SHARD_EXPANDED_BYTES):
 +                raise ValueError('task archive record bound exceeded')
 +            if output is None or size+len(wire)>MAX_SHARD_EXPANDED_BYTES:
-+                if output is not None:finish_shard()
++                finish_shard()
 +                if len(members)>=MAX_SHARDS:raise ValueError('task archive shard count bound exceeded')
 +                member=pending/Path(_shard_path(len(members))).name
 +                raw=files.enter_context(member.open('xb'))
@@ -112,10 +116,27 @@
 -        emit({'format':FORMAT,'binding':binding,'present_fields':present})
 +
 +        emit({'format':SHARDED_FORMAT,'binding':binding,'present_fields':present})
++        # The binding changes every generation. Keep it out of reusable records.
++        finish_shard()
          for value in checkpoint.get('task_state',[]):
              _task(value,binding)
              if value['id'] in seen_ids or value['identity_hash'] in seen_hashes:raise ValueError('duplicate original archived task')
-@@ -102,72 +148,102 @@
+@@ -87,12 +139,14 @@
+             if counts['task']>MAX_ITEMS:raise ValueError('task archive count bound exceeded')
+             emit({'kind':'task','value':value})
+         for field,kind,seen in [('completed_task_ids','completed',completed),('unfinished_task_ids','unfinished',unfinished)]:
++            finish_shard()
+             for value in checkpoint.get(field,[]):
+                 _identity(value)
+                 if value in seen:raise ValueError('duplicate archived identity set')
+                 seen.add(value);counts[kind]+=1
+                 if counts[kind]>MAX_ITEMS:raise ValueError('task archive identity count bound exceeded')
+                 emit({'kind':kind,'value':value})
++        finish_shard()
+         queue=checkpoint.get('price_history_queue',{})
+         if not isinstance(queue,dict) or set(queue)-set(binding['owned_sources']):raise ValueError('owned original history queue required')
+         for source,values in queue.items():
+@@ -102,72 +156,172 @@
                  _job_id(value);counts['history']+=1
                  if counts['history']>MAX_ITEMS:raise ValueError('history archive count bound exceeded')
                  emit({'kind':'history','source':source,'value':value})
@@ -271,3 +292,136 @@
 +            shutil.copyfile(source,target)
 +            _verify_file(target,member)
 +        pending.rename(destination)
++
++def _asset_name(member):
++    return f"task-state-{Path(member['path']).name}.enc"
++
++
++def _asset_binding(binding, member):
++    return f"{binding['stream_id']}:task-state:{member['sha256']}"
++
++
++def _validate_asset_index(reference, index, binding, *, last_sequence):
++    members = _reference(reference, binding)
++    if (reference['format'] != SHARDED_FORMAT or not isinstance(index, dict)
++            or set(index) != {member['path'] for member in members}):
++        raise ValueError('exact external task archive index required')
++    pattern = re.compile(r"data-" + re.escape(binding['stream_id']) + r"-(\d{9,})(?:-r\d+-a\d+)?")
++    for member in members:
++        asset = index[member['path']]
++        match = pattern.fullmatch(asset.get('tag', '')) if isinstance(asset, dict) and isinstance(asset.get('tag'), str) else None
++        if (not match or not 1 <= int(match[1]) <= last_sequence
++                or set(asset) != {'tag', 'asset', 'bytes', 'sha256'} or asset['asset'] != _asset_name(member)
++                or type(asset['bytes']) is not int or asset['bytes'] != member['bytes'] + HEADER.size + 16
++                or not isinstance(asset['sha256'], str) or not re.fullmatch('[a-f0-9]{64}', asset['sha256'])):
++            raise ValueError('invalid external task archive asset')
++    return members
++
++
++def publishable_shards(reference, root, output, *, binding, tag, key, end_sequence=None, previous=None):
++    """Publish changed shards once. Keep the authenticated locators of unchanged bytes."""
++    members = _verified_members(reference, root, binding)
++    inherited = {}
++    if previous is not None:
++        prior_ref, prior_index = previous
++        prior_members = _validate_asset_index(prior_ref, prior_index, prior_ref['binding'],
++                                              last_sequence=binding['start_sequence'] - 1)
++        inherited = {member['path']: (member, prior_index[member['path']]) for member in prior_members}
++    index, uploads = {}, []
++    for path, member in members:
++        slot = member['path']
++        if slot in inherited and inherited[slot][0] == member:
++            index[slot] = inherited[slot][1]
++            continue
++        asset = _asset_name(member)
++        destination = Path(output) / asset
++        proof = encrypt_file(path, destination, key=key, binding=_asset_binding(binding, member),
++                             max_bytes=member['bytes'])
++        index[slot] = {'tag': tag, 'asset': asset, **proof}
++        uploads.append(destination)
++    _validate_asset_index(reference, index, binding,
++        last_sequence=binding['start_sequence'] if end_sequence is None else end_sequence)
++    return index, uploads
++
++
++def restore_shards(reference, index, root, *, binding, key, fetch, last_sequence=None):
++    """Restore each referenced encrypted shard and verify its original compressed bytes."""
++    members = _validate_asset_index(reference, index, binding,
++        last_sequence=binding['start_sequence'] if last_sequence is None else last_sequence)
++    destination = safe_path(root, SHARD_DIR)
++    if destination.exists():
++        raise ValueError('fresh external task archive destination required')
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    with TemporaryDirectory(prefix='.pending-', dir=destination.parent) as temporary:
++        pending = Path(temporary)
++        for member in members:
++            asset = index[member['path']]
++            ciphertext = fetch(asset['tag'], asset['asset'], asset['bytes'])
++            target = pending / Path(member['path']).name
++            decrypt_file(ciphertext, target, key=key, binding=_asset_binding(binding, member),
++                         record={field: asset[field] for field in ('bytes', 'sha256')}, max_bytes=member['bytes'])
++            _verify_file(target, member)
++        pending.rename(destination)
+--- a/scripts/remote_extended_cycle.py
++++ b/scripts/remote_extended_cycle.py
+@@ -28,7 +28,7 @@
+ from backtest_data.remote.identity import validate_raw_identity_index
+ from backtest_data.remote.resume import LazyWindowResolver,window_snapshot,compact_windows
+ from backtest_data.remote.paced_publication import publish_release
+-from backtest_data.remote.task_archive import make_binding,hydrate_checkpoint,stage_archive
++from backtest_data.remote.task_archive import make_binding,hydrate_checkpoint,publishable_shards,restore_shards
+ 
+ 
+ def publication_summary(head,tag,state):
+@@ -74,10 +74,25 @@
+         checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
+         previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
+     task_binding=make_binding(configuration,stream,start_sequence=sequence)
++    prior_task_archive=None
++    task_asset_index=checkpoint.pop('task_archive_assets',None)
++    if task_asset_index is not None and 'task_state_archive' not in checkpoint:
++        raise ValueError('external task archive reference required')
+     if 'task_state_archive' in checkpoint:
+         if prior is None:raise ValueError('authenticated task archive predecessor required')
+         incoming_binding=make_binding(configuration,stream,start_sequence=prior['start_sequence'])
+-        checkpoint=hydrate_checkpoint(checkpoint,work/'resume-incoming',binding=incoming_binding)
++        task_root=work/'resume-incoming'
++        if task_asset_index is not None:
++            by_tag={release['tag_name']:release for release in releases}
++            def fetch_task_asset(tag,name,size):
++                if tag not in by_tag:raise ValueError('published task archive asset required')
++                return download_asset(gh,repo,by_tag[tag],name,work/'task-archive-download'/tag,max_bytes=size)
++            ref=checkpoint['task_state_archive']
++            task_root=work/'task-archive-incoming'
++            restore_shards(ref,task_asset_index,task_root,binding=incoming_binding,key=key,
++                           fetch=fetch_task_asset,last_sequence=prior['end_sequence'])
++            prior_task_archive=(ref,task_asset_index)
++        checkpoint=hydrate_checkpoint(checkpoint,task_root,binding=incoming_binding)
+     if checkpoint.get('handoff_id')!=configuration['handoff_id'] or checkpoint.get('forward_start')!=configuration['forward_start']:
+         raise ValueError('explicit checkpoint handoff and forward scope required')
+     if any(task['source'] not in {'kis','kis_overseas'} or task['request'].get('output_start','')<configuration['forward_start'] for task in checkpoint.get('task_state',[])):
+@@ -143,8 +158,14 @@
+             scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
+             resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
+             state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
++        task_assets=[]
+         if 'task_state_archive' in state:
+-            stage_archive(state['task_state_archive'],work/'task-archive-output',resumed,binding=task_binding)
++            ref=state['task_state_archive']
++            state['task_archive_assets'],task_assets=publishable_shards(ref,work/'task-archive-output',
++                work/'task-archive-encrypted',binding=task_binding,tag=tag,key=key,end_sequence=head['sequence'],
++                previous=prior_task_archive)
++            print(json.dumps({'status':'extra_task_shards_ready','shards':len(ref['shards']),
++                'new_shards':len(task_assets),'reused_shards':len(ref['shards'])-len(task_assets)}),flush=True)
+         # Initial bootstrap did not occupy the state path; all files use fresh
+         # names in this generation even when a predecessor was restored.
+         zip_store(resumed,work/'next-resume.zip')
+@@ -164,7 +185,7 @@
+             'created_at':utcnow().isoformat(),'coverage_complete':False}
+         commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
+         read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
+-        publish_release(gh,repo,tag,[*[work/name for name in sorted(files)],work/(windows.name+'.enc'),*raw_assets,commit_path],
++        publish_release(gh,repo,tag,[*[work/name for name in sorted(files)],work/(windows.name+'.enc'),*raw_assets,*task_assets,commit_path],
+             # This tag is a delivery control marker. A stale workflow commit
+             # can require unavailable GITHUB_TOKEN workflow-write permission.
+             target='main',control_target=True,title='Encrypted extra-source checkpoint '+str(head['sequence']),
