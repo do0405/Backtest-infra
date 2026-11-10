@@ -1,0 +1,273 @@
+--- a/src/backtest_data/remote/task_archive.py
++++ b/src/backtest_data/remote/task_archive.py
+@@ -1,8 +1,10 @@
+ """Lossless task metadata in the existing encrypted resume ZIP; no SQL rows."""
+ from collections import Counter
++from contextlib import ExitStack
+ from copy import deepcopy
+ import gzip,hashlib,re,shutil
+ from pathlib import Path
++from tempfile import TemporaryDirectory
+ from uuid import UUID
+ from .codec import dumps,loads
+ from .checkpoint import runtime_task
+@@ -10,6 +12,10 @@
+ 
+ PATH='heads/task-state/metadata.json.gz'
+ FORMAT='backtest_portable_task_state_ndjson_v1'
++SHARDED_FORMAT='backtest_portable_task_state_ndjson_v2'
++SHARD_DIR='heads/task-state/segments-v2'
++MAX_SHARD_EXPANDED_BYTES=64*1024**2
++MAX_SHARDS=64
+ FIELDS=('task_state','completed_task_ids','unfinished_task_ids','price_history_queue')
+ MAX_LINE_BYTES=1024*1024
+ MAX_EXPANDED_BYTES=1024**3
+@@ -46,17 +52,39 @@
+         raise ValueError('original task outside archive source scope')
+     dumps(value)
+ 
++def _member(value, path, limit):
++    return (isinstance(value,dict) and set(value)=={'path','bytes','expanded_bytes','sha256'}
++            and value['path']==path and type(value['bytes']) is int
++            and 0<value['bytes']<=MAX_BUNDLE_BYTES and type(value['expanded_bytes']) is int
++            and 0<value['expanded_bytes']<=limit and isinstance(value['sha256'],str)
++            and re.fullmatch('[a-f0-9]{64}',value['sha256']))
++
++
++def _shard_path(index):
++    return f'{SHARD_DIR}/{index:04d}.json.gz'
++
++
+ def _reference(value,binding):
+-    expected={'format','path','binding','bytes','expanded_bytes','sha256','payload_sha256','counts','source_counts'}
+-    if (not isinstance(value,dict) or set(value)!=expected or value['format']!=FORMAT or value['path']!=PATH
+-        or value['binding']!=_binding(binding) or type(value['bytes']) is not int or not 0<value['bytes']<=MAX_BUNDLE_BYTES
+-        or type(value['expanded_bytes']) is not int or not 0<value['expanded_bytes']<=MAX_EXPANDED_BYTES
+-        or any(not re.fullmatch('[a-f0-9]{64}',value[key]) for key in ('sha256','payload_sha256'))
+-        or set(value['counts'])!=set(KINDS) or any(type(n) is not int or not 0<=n<=MAX_ITEMS for n in value['counts'].values())
++    common={'format','binding','payload_sha256','counts','source_counts'}
++    if (not isinstance(value,dict) or not common<=value.keys() or value['binding']!=_binding(binding)
++        or not isinstance(value['payload_sha256'],str) or not re.fullmatch('[a-f0-9]{64}',value['payload_sha256'])
++        or not isinstance(value['counts'],dict) or set(value['counts'])!=set(KINDS)
++        or any(type(n) is not int or not 0<=n<=MAX_ITEMS for n in value['counts'].values())
+         or not isinstance(value['source_counts'],dict) or set(value['source_counts'])-set(binding['owned_sources'])
+         or any(type(n) is not int or not 0<=n<=MAX_ITEMS for n in value['source_counts'].values())):
+         raise ValueError('bounded exact task archive reference required')
+-    dumps(value);return value
++    if value['format']==FORMAT and value.keys()==common|{'path','bytes','expanded_bytes','sha256'}:
++        legacy={key:value[key] for key in ('path','bytes','expanded_bytes','sha256')}
++        if _member(legacy,PATH,MAX_EXPANDED_BYTES):
++            return [legacy]
++    if value['format']==SHARDED_FORMAT and value.keys()==common|{'shards'}:
++        members=value['shards']
++        if (isinstance(members,list) and 0<len(members)<=MAX_SHARDS
++            and all(_member(item,_shard_path(index),MAX_SHARD_EXPANDED_BYTES) for index,item in enumerate(members))
++            and sum(item['bytes'] for item in members)<=MAX_BUNDLE_BYTES):
++            return members
++    raise ValueError('bounded exact task archive reference required')
++
+ 
+ def _digest(path):
+     value=hashlib.sha256()
+@@ -67,19 +95,37 @@
+ def detach_checkpoint(checkpoint,root,*,binding):
+     binding=deepcopy(_binding(binding))
+     if 'task_state_archive' in checkpoint:raise ValueError('hydrate task archive before replacing its authority')
+-    path=safe_path(root,PATH);path.parent.mkdir(parents=True,exist_ok=True)
+-    if path.exists():raise ValueError('fresh task archive output required')
+-    pending=path.with_name(path.name+'.pending');counts=Counter({kind:0 for kind in KINDS});sources=Counter();size=0;sha=hashlib.sha256()
++    destination=safe_path(root,SHARD_DIR)
++    destination.parent.mkdir(parents=True,exist_ok=True)
++    if destination.exists():raise ValueError('fresh task archive output required')
++    counts=Counter({kind:0 for kind in KINDS});sources=Counter();sha=hashlib.sha256()
+     present=[key for key in FIELDS if key in checkpoint]
+     seen_ids=set();seen_hashes=set();completed=set();unfinished=set()
+-    with pending.open('xb') as raw,gzip.GzipFile(fileobj=raw,mode='wb',mtime=0,filename='') as output:
++    members=[]
++    with TemporaryDirectory(prefix='.pending-',dir=destination.parent) as temporary, ExitStack() as files:
++        pending=Path(temporary)
++        member=None;size=0;output=None
++
++        def finish_shard():
++            files.close()
++            members.append(dict(path=_shard_path(len(members)),bytes=member.stat().st_size,
++                                expanded_bytes=size,sha256=_digest(member)))
++
+         def emit(value):
+-            nonlocal size
++            nonlocal member,size,output
+             wire=dumps(value).encode()+b'\n'
+-            if len(wire)>MAX_LINE_BYTES or size+len(wire)>MAX_EXPANDED_BYTES:raise ValueError('task archive expansion bound exceeded')
+-            # Validate exact privacy/types before this record reaches compression.
++            if len(wire)>min(MAX_LINE_BYTES,MAX_SHARD_EXPANDED_BYTES):
++                raise ValueError('task archive record bound exceeded')
++            if output is None or size+len(wire)>MAX_SHARD_EXPANDED_BYTES:
++                if output is not None:finish_shard()
++                if len(members)>=MAX_SHARDS:raise ValueError('task archive shard count bound exceeded')
++                member=pending/Path(_shard_path(len(members))).name
++                raw=files.enter_context(member.open('xb'))
++                output=files.enter_context(gzip.GzipFile(fileobj=raw,mode='wb',mtime=0,filename=''))
++                size=0
+             output.write(wire);sha.update(wire);size+=len(wire)
+-        emit({'format':FORMAT,'binding':binding,'present_fields':present})
++
++        emit({'format':SHARDED_FORMAT,'binding':binding,'present_fields':present})
+         for value in checkpoint.get('task_state',[]):
+             _task(value,binding)
+             if value['id'] in seen_ids or value['identity_hash'] in seen_hashes:raise ValueError('duplicate original archived task')
+@@ -102,72 +148,102 @@
+                 _job_id(value);counts['history']+=1
+                 if counts['history']>MAX_ITEMS:raise ValueError('history archive count bound exceeded')
+                 emit({'kind':'history','source':source,'value':value})
+-    if pending.stat().st_size>MAX_BUNDLE_BYTES:raise ValueError('compressed task archive bound exceeded')
+-    ref={'format':FORMAT,'path':PATH,'binding':binding,'bytes':pending.stat().st_size,'expanded_bytes':size,
+-        'sha256':_digest(pending),'payload_sha256':sha.hexdigest(),'counts':dict(counts),'source_counts':dict(sources)}
+-    _reference(ref,binding);pending.replace(path)
++        finish_shard()
++        ref=dict(format=SHARDED_FORMAT,binding=binding,shards=members,
++                 payload_sha256=sha.hexdigest(),counts=dict(counts),source_counts=dict(sources))
++        _reference(ref,binding)
++        pending.rename(destination)
+     return {**{key:value for key,value in checkpoint.items() if key not in FIELDS},'task_state_archive':ref}
+ 
+-def verified_path(reference,root,*,binding):
+-    _reference(reference,binding);path=safe_path(root,reference['path'])
+-    if not path.is_file() or path.stat().st_size!=reference['bytes'] or _digest(path)!=reference['sha256']:
++
++def _verify_file(path,member):
++    if not path.is_file() or path.stat().st_size!=member['bytes'] or _digest(path)!=member['sha256']:
+         raise ValueError('authenticated task archive byte proof mismatch')
+     return path
++
++
++def _verified_members(reference,root,binding):
++    return [(_verify_file(safe_path(root,member['path']),member),member)
++            for member in _reference(reference,binding)]
++
++
++def _lines(reference,root,binding):
++    for path,member in _verified_members(reference,root,binding):
++        size=0
++        with gzip.open(path,'rb') as source:
++            while wire:=source.readline(MAX_LINE_BYTES+1):
++                size+=len(wire)
++                if len(wire)>MAX_LINE_BYTES or size>member['expanded_bytes'] or not wire.endswith(b'\n'):
++                    raise ValueError('task archive expansion bound exceeded')
++                yield wire
++        if size!=member['expanded_bytes']:
++            raise ValueError('exact task archive shard expansion proof mismatch')
++
+ 
+ def hydrate_checkpoint(checkpoint,root,*,binding):
+     if 'task_state_archive' not in checkpoint:return dict(checkpoint)
+     if any(key in checkpoint for key in FIELDS):raise ValueError('one original task metadata authority required')
+-    ref=checkpoint['task_state_archive'];path=verified_path(ref,root,binding=binding)
+-    counts=Counter({kind:0 for kind in KINDS});sources=Counter();size=0;sha=hashlib.sha256()
++    ref=checkpoint['task_state_archive']
++    counts=Counter({kind:0 for kind in KINDS});sources=Counter();sha=hashlib.sha256()
+     original={};seen_ids=set();seen_hashes=set();identities={'completed':set(),'unfinished':set()};history_sets={}
++    first=True
+     try:
+-        with gzip.open(path,'rb') as input:
+-            first=True
+-            while True:
+-                wire=input.readline(MAX_LINE_BYTES+1)
+-                if not wire:break
+-                size+=len(wire)
+-                if len(wire)>MAX_LINE_BYTES or size>ref['expanded_bytes'] or size>MAX_EXPANDED_BYTES:raise ValueError('task archive expansion bound exceeded')
+-                sha.update(wire);value=loads(wire)
+-                if first:
+-                    first=False
+-                    if (set(value)!={'format','binding','present_fields'} or value['format']!=FORMAT or value['binding']!=binding
+-                        or not isinstance(value['present_fields'],list) or value['present_fields']!=[key for key in FIELDS if key in value['present_fields']]):
+-                        raise ValueError('exact typed task archive header required')
+-                    original={key:{} if key=='price_history_queue' else [] for key in value['present_fields']}
+-                    continue
+-                kind=value.get('kind')
+-                if kind not in KINDS:raise ValueError('registered task metadata record required')
+-                counts[kind]+=1
+-                if counts[kind]>MAX_ITEMS:raise ValueError('task metadata count bound exceeded')
+-                if kind=='task':
+-                    if set(value)!={'kind','value'} or 'task_state' not in original:raise ValueError('exact task metadata record required')
+-                    row=value['value'];_task(row,binding)
+-                    if row['id'] in seen_ids or row['identity_hash'] in seen_hashes:raise ValueError('duplicate original archived task')
+-                    seen_ids.add(row['id']);seen_hashes.add(row['identity_hash']);sources[row['source']]+=1;original['task_state'].append(row)
+-                elif kind in identities:
+-                    field='completed_task_ids' if kind=='completed' else 'unfinished_task_ids'
+-                    if set(value)!={'kind','value'} or field not in original:raise ValueError('exact identity metadata record required')
+-                    row=value['value'];_identity(row)
+-                    if row in identities[kind]:raise ValueError('duplicate original archived identity')
+-                    identities[kind].add(row);original[field].append(row)
+-                elif kind=='history_source':
+-                    source=value['source']
+-                    if set(value)!={'kind','source'} or source not in binding['owned_sources'] or 'price_history_queue' not in original or source in history_sets:
+-                        raise ValueError('exact history source record required')
+-                    history_sets[source]=set();original['price_history_queue'][source]=[]
+-                else:
+-                    source=value['source'];row=value['value'];_job_id(row)
+-                    if set(value)!={'kind','source','value'} or source not in history_sets or row in history_sets[source]:raise ValueError('exact ordered history metadata required')
+-                    history_sets[source].add(row);original['price_history_queue'][source].append(row)
++        for wire in _lines(ref,root,binding):
++            sha.update(wire);value=loads(wire)
++            if first:
++                first=False
++                if (set(value)!={'format','binding','present_fields'} or value['format']!=ref['format'] or value['binding']!=binding
++                    or not isinstance(value['present_fields'],list) or value['present_fields']!=[key for key in FIELDS if key in value['present_fields']]):
++                    raise ValueError('exact typed task archive header required')
++                original={key:{} if key=='price_history_queue' else [] for key in value['present_fields']}
++                continue
++            kind=value.get('kind')
++            if kind not in KINDS:raise ValueError('registered task metadata record required')
++            counts[kind]+=1
++            if counts[kind]>MAX_ITEMS:raise ValueError('task metadata count bound exceeded')
++            if kind=='task':
++                if set(value)!={'kind','value'} or 'task_state' not in original:raise ValueError('exact task metadata record required')
++                row=value['value'];_task(row,binding)
++                if row['id'] in seen_ids or row['identity_hash'] in seen_hashes:raise ValueError('duplicate original archived task')
++                seen_ids.add(row['id']);seen_hashes.add(row['identity_hash']);sources[row['source']]+=1;original['task_state'].append(row)
++            elif kind in identities:
++                field='completed_task_ids' if kind=='completed' else 'unfinished_task_ids'
++                if set(value)!={'kind','value'} or field not in original:raise ValueError('exact identity metadata record required')
++                row=value['value'];_identity(row)
++                if row in identities[kind]:raise ValueError('duplicate original archived identity')
++                identities[kind].add(row);original[field].append(row)
++            elif kind=='history_source':
++                source=value['source']
++                if set(value)!={'kind','source'} or source not in binding['owned_sources'] or 'price_history_queue' not in original or source in history_sets:
++                    raise ValueError('exact history source record required')
++                history_sets[source]=set();original['price_history_queue'][source]=[]
++            else:
++                source=value['source'];row=value['value'];_job_id(row)
++                if set(value)!={'kind','source','value'} or source not in history_sets or row in history_sets[source]:raise ValueError('exact ordered history metadata required')
++                history_sets[source].add(row);original['price_history_queue'][source].append(row)
+     except (EOFError,OSError,KeyError,TypeError):
+         raise ValueError('invalid bounded task archive') from None
+-    if first or size!=ref['expanded_bytes'] or sha.hexdigest()!=ref['payload_sha256'] or dict(counts)!=ref['counts'] or dict(sources)!=ref['source_counts']:
++    if first or sha.hexdigest()!=ref['payload_sha256'] or dict(counts)!=ref['counts'] or dict(sources)!=ref['source_counts']:
+         raise ValueError('exact task archive count and expansion proof mismatch')
+     return {**{key:value for key,value in checkpoint.items() if key!='task_state_archive'},**original}
+ 
+ def stage_archive(reference,source_root,resume_root,*,binding):
+-    source=verified_path(reference,source_root,binding=binding);target=safe_path(resume_root,PATH)
+-    if target.exists():raise ValueError('fresh resume task metadata path required')
+-    target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
+-    verified_path(reference,resume_root,binding=binding)
++    members=_verified_members(reference,source_root,binding)
++    if reference['format']==FORMAT:
++        source,member=members[0]
++        target=safe_path(resume_root,PATH)
++        if target.exists():raise ValueError('fresh resume task metadata path required')
++        target.parent.mkdir(parents=True,exist_ok=True)
++        shutil.copyfile(source,target)
++        _verify_file(target,member)
++        return
++    destination=safe_path(resume_root,SHARD_DIR)
++    if destination.exists():raise ValueError('fresh resume task metadata path required')
++    destination.parent.mkdir(parents=True,exist_ok=True)
++    with TemporaryDirectory(prefix='.pending-',dir=destination.parent) as temporary:
++        pending=Path(temporary)
++        for source,member in members:
++            target=pending/source.name
++            shutil.copyfile(source,target)
++            _verify_file(target,member)
++        pending.rename(destination)
