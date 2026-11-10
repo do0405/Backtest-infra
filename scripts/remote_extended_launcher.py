@@ -9,11 +9,32 @@ import subprocess
 import sys
 import zipfile
 
+ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
+ARCHIVE_SOURCE_SHA256='a244ccda6fdb0eb877d5f524b3288c92c17a21968ed035d1a1f14b9dcb74c8c6'
+ARCHIVE_PATCH_SHA256='366425da1c4ee4f1184380b9aeae8b934c87c98fc756dfc802c9e197574e96b8'
+
 
 def command(arguments,**kwargs):
     result=subprocess.run(arguments,capture_output=True,timeout=kwargs.pop('timeout',300),**kwargs)
     if result.returncode:raise RuntimeError('extra_runtime_operation_failed')
     return result.stdout
+
+
+def apply_task_archive_overlay(runtime,base_sha256):
+    if base_sha256!=ARCHIVE_BASE_SHA256:return
+    patch=Path(__file__).with_name('extra-task-archive-v9.patch').resolve()
+    if sha256(patch.read_bytes()).hexdigest()!=ARCHIVE_PATCH_SHA256:
+        raise ValueError('exact sharded task archive patch required')
+    source=runtime/'src/backtest_data/remote/task_archive.py'
+    canonical=source.read_text(encoding='utf-8')
+    source.write_text(canonical,encoding='utf-8',newline='\n')
+    arguments=['git','-c','core.autocrlf=false','apply']
+    command([*arguments,'--check',str(patch)],cwd=runtime)
+    command([*arguments,str(patch)],cwd=runtime)
+    if sha256(source.read_bytes()).hexdigest()!=ARCHIVE_SOURCE_SHA256:
+        raise ValueError('exact sharded task archive source hash required')
+    print(json.dumps({'status':'extra_task_archive_overlay_applied',
+                      'base_runtime_sha256':base_sha256,'archive_source_sha256':ARCHIVE_SOURCE_SHA256}),flush=True)
 
 
 def main():
@@ -46,6 +67,7 @@ def main():
                 raise ValueError('code-only extra runtime required')
         if expanded>256*1024**2:raise ValueError('bounded expanded extra runtime required')
         source.extractall(runtime)
+    apply_task_archive_overlay(runtime,config['runtime_sha256'])
     command([sys.executable,'-m','pip','install','--no-deps','-r',str(runtime/'scripts/remote-extended-requirements.txt')])
     command([sys.executable,'-m','pip','install','--no-deps','--no-build-isolation','-e',str(runtime)])
     command([sys.executable,'-m','pip','check'])
