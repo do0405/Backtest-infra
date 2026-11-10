@@ -425,3 +425,250 @@
              # This tag is a delivery control marker. A stale workflow commit
              # can require unavailable GITHUB_TOKEN workflow-write permission.
              target='main',control_target=True,title='Encrypted extra-source checkpoint '+str(head['sequence']),
+--- a/src/backtest_data/remote/extra_cadence.py
++++ b/src/backtest_data/remote/extra_cadence.py
+@@ -1,15 +1,22 @@
+ """Fresh Extra price/official plans; immutable old requests remain untouched."""
++from collections import Counter
+ from copy import deepcopy
+ from datetime import date,datetime,timedelta
+ from zoneinfo import ZoneInfo
+ import time
+ from ..collection.cadence import provider_ready_date
++from ..ingestion.jobs import MAX_HISTORY_JOB_IDS, logical_request, stable_hash
+ from ..remote_updates import build_update_jobs
+ 
+ 
+-def history_rotation(tasks,previous,*,source,as_of,limit=128):
++MAX_DAILY_JOBS_PER_LANE = 17_758
++DAILY_LANES = {'daily_latest', 'daily_catchup'}
++LIVE_STATUSES = {'pending', 'retry', 'running'}
++
++
++def history_rotation(tasks,previous,*,source,as_of,limit=MAX_HISTORY_JOB_IDS):
+     """A finite restored rotation lets already-attempted work precede arrivals."""
+-    if not isinstance(previous,list) or len(previous)!=len(set(previous)) or not 1<=limit<=128:
++    if not isinstance(previous,list) or len(previous)!=len(set(previous)) or not 1<=limit<=MAX_HISTORY_JOB_IDS:
+         raise ValueError('bounded distinct price history rotation required')
+     current=provider_ready_date(source,as_of).isoformat()
+     retained={task['id']:task for task in tasks if task['source']==source and task['domain']=='prices'
+@@ -24,7 +31,8 @@
+     eligible={identity for identity,task in retained.items() if due(task)}
+     queue=[identity for identity in previous if identity in retained]
+     if not any(identity in eligible for identity in queue):
+-        queue.extend(identity for identity in sorted(retained,key=lambda identity:(retained[identity]['request']['output_end'],identity)) if identity not in queue)
++        already_queued = set(queue)
++        queue.extend(identity for identity in sorted(retained,key=lambda identity:(retained[identity]['request']['output_end'],identity)) if identity not in already_queued)
+     return queue,[identity for identity in queue if identity in eligible][:limit]
+ 
+ 
+@@ -41,12 +49,17 @@
+ def run_price_budget(collector,engine,raw_root,slot,*,budget_seconds,as_of,hard_deadline,history_ids=None):
+     deadline=min(time.monotonic()+budget_seconds,hard_deadline);day=provider_ready_date(slot['source'],as_of)
+     outcomes=[]
++    unused_latest=0
+     for lane,share in price_execution_shares(budget_seconds):
+-        available=deadline-time.monotonic()
++        started=time.monotonic()
++        available=deadline-started
+         if available<=0:break
++        allowance=min(share+(unused_latest if lane=='history' else 0),available)
+         outcomes.append(collector(engine,raw_root,market=slot['market'],domain=slot['domain'],
+-            budget_seconds=min(share,available),mode='incremental',source_filter=[slot['source']],request_lane=lane,request_day=day,
++            budget_seconds=allowance,mode='incremental',source_filter=[slot['source']],request_lane=lane,request_day=day,
+             **({'request_ids':history_ids} if lane=='history' and history_ids is not None else {})))
++        if lane=='latest':
++            unused_latest=max(0,allowance-(time.monotonic()-started))
+     return outcomes
+ 
+ 
+@@ -54,7 +67,9 @@
+     result={}
+     for source in sorted(sources):
+         expected={row['security_id'] for row in members if row['market']==('KR' if source=='kis' else 'US')}
+-        groups={};numeric=set();empty=set();unsupported=set()
++        archived=checkpoint.get('completed_price_observations',{}).get(source,{})
++        groups={};numeric=set(archived.get('numeric',()))&expected
++        empty=set(archived.get('valid_empty',()))&expected;unsupported=set()
+         for task in checkpoint.get('task_state',[]):
+             if task['source']!=source or task['domain']!='prices' or task['entity_id'] not in expected:continue
+             request=task['request'];start=date.fromisoformat(request['output_start']);end=date.fromisoformat(request['output_end'])
+@@ -86,23 +101,108 @@
+     return result
+ 
+ 
++def _daily_identity(job):
++    request = logical_request(job['request'])
++    lane = request.get('cadence_lane')
++    # These two policies differ only in scheduling. All provider request fields
++    # and other policies still participate in identity.
++    if lane in DAILY_LANES and request.get('refresh_policy') == f'extra_{lane}_v6':
++        request.pop('cadence_lane')
++        request.pop('refresh_policy')
++    return stable_hash([job['source'], job['domain'], job['entity_id'], request])
++
++
++def _daily_queue(members, checkpoint, sources, current, candidate_days):
++    capacities = {source: min(MAX_DAILY_JOBS_PER_LANE, len({
++        row['security_id'] for row in members if row['market'] == ('KR' if source == 'kis' else 'US')
++    })) for source in sources}
++    pending = Counter()
++    represented = set()
++    for task in checkpoint.get('task_state', []):
++        source = task['source']
++        if source not in sources or task['domain'] != 'prices':
++            continue
++        request = task['request']
++        lane = request.get('cadence_lane')
++        day = request.get('output_end')
++        if lane not in DAILY_LANES or request.get('output_start') != day:
++            continue
++        if task['status'] != 'superseded' and day in candidate_days[source]:
++            represented.add(_daily_identity(task))
++        if task['status'] in LIVE_STATUSES:
++            live_lane = 'daily_latest' if lane == 'daily_latest' and day == current[source] else 'daily_catchup'
++            pending[source, live_lane] += 1
++    return capacities, pending, represented
++
++
++def retire_completed_daily_jobs(checkpoint, progress):
++    """Retire succeeded daily jobs that the certified cutoff makes unreachable."""
++    archived = checkpoint.setdefault('completed_price_observations', {})
++    observations = {source: (set(value.get('numeric', ())), set(value.get('valid_empty', ())))
++                    for source, value in archived.items()}
++    retained = []
++    retired = set()
++    for task in checkpoint.get('task_state', []):
++        source = task['source']
++        request = task['request']
++        end = request.get('output_end')
++        lane = request.get('cadence_lane')
++        if (source not in progress or task['domain'] != 'prices' or task['status'] != 'succeeded'
++                or lane not in DAILY_LANES or request.get('refresh_policy') != f'extra_{lane}_v6'
++                or not end or request.get('output_start') != end
++                or end > progress[source]['request_completed_through']):
++            retained.append(task)
++            continue
++        retired.add(task['identity_hash'])
++        numeric, empty = observations.setdefault(source, (set(), set()))
++        evidence = task['checkpoint']
++        if evidence.get('source_rows_total', evidence.get('source_row_count', 0)) > 0:
++            numeric.add(task['entity_id'])
++        elif evidence.get('response_valid') is True:
++            empty.add(task['entity_id'])
++    checkpoint['task_state'] = retained
++    checkpoint['completed_task_ids'] = [identity for identity in checkpoint['completed_task_ids'] if identity not in retired]
++    checkpoint['completed_price_observations'] = {
++        source: {'numeric': sorted(numeric), 'valid_empty': sorted(empty)}
++        for source, (numeric, empty) in observations.items()
++    }
++    for source, row in progress.items():
++        checkpoint['completed_through'][source] = row['request_completed_through']
++    return len(retired)
++
++
+ def plan_price_cadence(members,issuers,*,manifest_id,original_scope,as_of,sources,checkpoint,forward_start,mappings):
+     if set(sources)-{'kis','kis_overseas'}:raise ValueError('explicit Extra price sources required')
+     progress=price_progress(members,checkpoint,sources=sources,forward_start=forward_start,as_of=as_of)
++    current = {source: provider_ready_date(source, as_of) for source in sources}
++    missing = {source: date.fromisoformat(progress[source]['first_unadmitted_date']) for source in sources}
++    candidate_days = {source: {current[source].isoformat(), missing[source].isoformat()} for source in sources}
++    current_labels = {source: day.isoformat() for source, day in current.items()}
++    capacities, pending, represented = _daily_queue(members, checkpoint, sources, current_labels, candidate_days)
+     templates=build_update_jobs(members,issuers,manifest_id=manifest_id,original_scope=original_scope,
+         as_of=as_of,enabled_sources=sources,mappings=mappings)
+     jobs=[]
+     for template in templates:
+-        source=template['source'];current=provider_ready_date(source,as_of)
+-        windows=[('daily_latest',current,current,0)] if current>=forward_start and date.fromisoformat(progress[source]['request_completed_through'])<current else []
+-        missing=date.fromisoformat(progress[source]['first_unadmitted_date'])
+-        if missing<current:windows.append(('daily_catchup',missing,missing,2))
+-        friday=current-timedelta(days=(current.weekday()-4)%7)
++        source=template['source'];day=current[source]
++        windows=[('daily_latest',day,day,0)] if day>=forward_start and date.fromisoformat(progress[source]['request_completed_through'])<day else []
++        gap=missing[source]
++        if gap<day:windows.append(('daily_catchup',gap,gap,2))
++        friday=day-timedelta(days=(day.weekday()-4)%7)
+         if friday>=forward_start:windows.append(('weekly_correction',max(forward_start,friday-timedelta(days=13)),friday,5))
+         for lane,start,end,priority in windows:
++            if lane in DAILY_LANES:
++                capacity = capacities[source]
++                if pending[source, lane] >= capacity or pending[source, 'daily_latest']+pending[source, 'daily_catchup'] >= 2*capacity:
++                    continue
+             job=deepcopy(template);job['priority']=priority;request=job['request']
+             request.update(output_start=start.isoformat(),output_end=end.isoformat(),cadence_lane=lane,
+                 refresh_policy='extra_'+lane+'_v6')
++            if lane in DAILY_LANES:
++                identity = _daily_identity(job)
++                if identity in represented:
++                    continue
++                represented.add(identity)
++                pending[source, lane] += 1
+             if lane=='weekly_correction':request['correction_anchor']=friday.isoformat()
+             jobs.append(job)
+     return jobs,{'policy':'extra_split_daily_weekly_v6','source_progress':progress,'planned_roots':len(jobs),'coverage_complete':False}
+--- a/src/backtest_data/remote/worker.py
++++ b/src/backtest_data/remote/worker.py
+@@ -140,7 +140,7 @@
+         # ownership/lease/fencing authority never enter the payload.
+         all_owned=list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({s['source'] for s in slots}))))
+         portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
+-        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue'}},**postprocess_state,
++        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue','completed_price_observations'}},**postprocess_state,
+                               "version": 2, "completed_task_ids": sorted(completed), "task_state":portable,
+                               "provider_rate_state":snapshot_rate_state(session,{s['source'] for s in slots},binding=rate_binding),
+                               **({'raw_identity_index':snapshot_raw_identities(session)} if 'raw_identity_index' in checkpoint else {}),
+@@ -148,16 +148,27 @@
+                               "completed_through":refresh_watermarks(all_owned,checkpoint.get('completed_through',{}),owned_sources={s['source'] for s in slots}),
+                               "data_export_cursor":{"stream_id":stream_id,"sequence":sequence,"previous_bundle_id":previous_bundle_id},
+                               "coverage_complete": False}
++        unfinished_count=len(durable_checkpoint['unfinished_task_ids'])
+         if ownership.get('etf_cadence')=='split_daily_weekly_v1':
+-            from .extra_cadence import price_progress,rotate_attempted
++            from .extra_cadence import price_progress,retire_completed_daily_jobs,rotate_attempted
+             price_sources={slot['source'] for slot in core_slots}&{'kis','kis_overseas'}
+             durable_checkpoint['price_history_queue']={source:rotate_attempted(queue,price_before,portable) for source,queue in price_queues.items()}
++            # An all-security coverage proof drives retirement. A watermark
++            # computed from only the live database would skip unadmitted work.
++            for source in price_sources:
++                durable_checkpoint['completed_through'].pop(source, None)
++                if source in checkpoint.get('completed_through', {}):
++                    durable_checkpoint['completed_through'][source]=checkpoint['completed_through'][source]
++            progress=price_progress(manifest_members,durable_checkpoint,sources=price_sources,
++                forward_start=datetime.fromisoformat(ownership['forward_start']).date(),as_of=utcnow())
++            retired=retire_completed_daily_jobs(durable_checkpoint,progress)
++            del durable_checkpoint['unfinished_task_ids']
+             durable_checkpoint['price_cadence_progress']={'policy':'extra_split_daily_weekly_v6',
+-                'source_progress':price_progress(manifest_members,durable_checkpoint,sources=price_sources,
+-                    forward_start=datetime.fromisoformat(ownership['forward_start']).date(),as_of=utcnow()),
+-                'planned_roots':len(planned_jobs),'coverage_complete':False}
++                'source_progress':progress,'planned_roots':len(planned_jobs),'coverage_complete':False}
++            print(json.dumps({'status':'extra_price_queue_lifecycle','planned_roots':len(planned_jobs),
++                'retired_daily_jobs':retired,'retained_tasks':len(durable_checkpoint['task_state']),
++                'unfinished_tasks':unfinished_count}),flush=True)
+         roots = {name: sorted(set(session.scalars(select(list(table.primary_key.columns)[0]))) - before[name]) for name, table in registry.items()}
+-        unfinished_count=len(durable_checkpoint['unfinished_task_ids'])
+         if task_archive_output_root is not None:
+             from .task_archive import detach_checkpoint
+             phase('task_state_archive_write_started')
+--- a/src/backtest_data/ingestion/jobs.py
++++ b/src/backtest_data/ingestion/jobs.py
+@@ -8,6 +8,9 @@
+ 
+ from ..db import new_id, utcnow
+ from .models import CollectionJob, RateBudget
++
++
++MAX_HISTORY_JOB_IDS = 2048
+ 
+ 
+ def stable_hash(value) -> str:
+@@ -124,7 +127,7 @@
+         elif request_lane=='correction':statement=statement.where(lane=='weekly_correction')
+         else:statement=statement.where(or_(lane.is_(None),lane!='weekly_correction'),or_(lane.is_(None),lane!='daily_latest',CollectionJob.request['output_end'].astext!=request_day.isoformat()))
+     if request_ids is not None:
+-        if request_lane!='history' or not isinstance(request_ids,list) or len(request_ids)>128 or len(request_ids)!=len(set(request_ids)):
++        if request_lane!='history' or not isinstance(request_ids,list) or len(request_ids)>MAX_HISTORY_JOB_IDS or len(request_ids)!=len(set(request_ids)):
+             raise ValueError('bounded distinct history selection required')
+         statement=statement.where(CollectionJob.id.in_(request_ids))
+     ordering = ([CollectionJob.attempts] if fair else []) + [CollectionJob.priority, CollectionJob.id]

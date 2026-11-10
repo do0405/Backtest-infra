@@ -12,7 +12,7 @@ import zipfile
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='9b04fe116a4becfcd7961d089f778b20fae6953622c375a99ca16ffcd07c5357'
 CYCLE_SOURCE_SHA256='1a82b2f4842d10ab78ac7e25f24fa40804126f9c652b39c523ba82416df3c4c7'
-ARCHIVE_PATCH_SHA256='26fcf49a7d470ba7a8b7a4455ffaaf5405b68a2e252a4dfd3ef041aaaa56e948'
+ARCHIVE_PATCH_SHA256='c4673d8c02982ef90a3c3f4c44213db352b472be90c7947884de86d113b7cff5'
 
 
 def command(arguments,**kwargs):
@@ -25,10 +25,13 @@ def apply_task_archive_overlay(runtime,base_sha256):
     if base_sha256!=ARCHIVE_BASE_SHA256:return
     patch=Path(__file__).with_name('extra-task-archive-v9.patch').resolve()
     if sha256(patch.read_bytes()).hexdigest()!=ARCHIVE_PATCH_SHA256:
-        raise ValueError('exact sharded task archive patch required')
+        raise ValueError('exact extra runtime patch required')
     sources={
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
+        runtime/'src/backtest_data/remote/extra_cadence.py':'ea92fb28c9a2288bb395f5d09d82a14cad10bf7c6ba315721a8d2383d0814cb4',
+        runtime/'src/backtest_data/remote/worker.py':'78a4e41c8b950ac941869189c564860f008d5a60324842d8bf310508d42a28ff',
+        runtime/'src/backtest_data/ingestion/jobs.py':'3d9bec67dc68830b708f22a0242a0c9887aa4d2e3522387a47af2759b08204ad',
     }
     for source in sources:
         canonical=source.read_text(encoding='utf-8')
@@ -37,10 +40,10 @@ def apply_task_archive_overlay(runtime,base_sha256):
     command([*arguments,'--check',str(patch)],cwd=runtime)
     command([*arguments,str(patch)],cwd=runtime)
     if any(sha256(source.read_bytes()).hexdigest()!=expected for source,expected in sources.items()):
-        raise ValueError('exact task archive and cycle source hashes required')
+        raise ValueError('exact extra runtime source hashes required')
     print(json.dumps({'status':'extra_task_archive_overlay_applied',
                       'base_runtime_sha256':base_sha256,'archive_source_sha256':ARCHIVE_SOURCE_SHA256,
-                      'cycle_source_sha256':CYCLE_SOURCE_SHA256}),flush=True)
+                      'cycle_source_sha256':CYCLE_SOURCE_SHA256,'patch_sha256':ARCHIVE_PATCH_SHA256}),flush=True)
 
 
 def main():
