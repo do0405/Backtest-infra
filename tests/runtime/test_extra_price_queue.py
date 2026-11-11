@@ -285,3 +285,38 @@ def test_extra_kis_lanes_share_one_token(cadence, monkeypatch):
         assert kis._headers('HHDFS76240000')['authorization'] == 'Bearer fixture-token'
     assert [method for _, method, _ in requests] == ['POST']
     assert closed == [True]
+
+
+def test_weekly_page_reuses_only_matching_observed_daily_requests(cadence, monkeypatch):
+    from types import SimpleNamespace
+    from backtest_data.ingestion import supervisor
+    from backtest_data.ingestion.jobs import load_coalesced_price_window, observed_price_requests
+
+    weekly = task('a', '2026-11-06', 'weekly_correction', checkpoint={'cursor_end': '2026-11-05'})
+    weekly['request'].update(output_start='2026-11-02', correction_anchor='2026-11-06')
+    leader = SimpleNamespace(**weekly)
+    matched = SimpleNamespace(**task('a', '2026-11-03', 'daily_catchup'), attempts=0)
+    missing = SimpleNamespace(**task('a', '2026-11-04', 'daily_catchup'), attempts=0)
+    out_of_page = SimpleNamespace(**task('a', '2026-11-06', 'daily_catchup'), attempts=0)
+    remapped = SimpleNamespace(**task('a', '2026-11-03', 'daily_latest'), attempts=0)
+    remapped.request['symbol'] = 'different-provider-symbol'
+    session = SimpleNamespace(scalars=lambda statement: [matched, missing, out_of_page, remapped])
+    window = load_coalesced_price_window(session, leader, ready_day=date(2026, 11, 10),
+                                         lane='correction')
+    assert window == (date(2026, 11, 2), date(2026, 11, 5),
+                      {matched.id: '2026-11-03', missing.id: '2026-11-04'})
+    completed = []
+
+    def finish(session, siblings, observed):
+        completed.extend(observed_price_requests(siblings, observed))
+        return len(completed)
+
+    monkeypatch.setattr(supervisor, 'finish_observed_price_requests', finish)
+    outcome = dict(observed_sessions=['2026-11-03'], response_valid=True, pagination_valid=True)
+    result = supervisor._record_kis_page(session, leader.request, leader.checkpoint, outcome, window)
+    assert result == (None, 1, 1)
+    assert completed == [matched.id]
+    assert outcome['normalized_rows_total'] == 1
+    invalid = dict(observed_sessions=['2026-11-04'], response_valid=True, pagination_valid=False)
+    assert supervisor._record_kis_page(session, leader.request, leader.checkpoint, invalid, window)[2] == 0
+    assert completed == [matched.id]

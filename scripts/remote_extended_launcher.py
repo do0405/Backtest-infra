@@ -12,7 +12,7 @@ import zipfile
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='9b04fe116a4becfcd7961d089f778b20fae6953622c375a99ca16ffcd07c5357'
 CYCLE_SOURCE_SHA256='5b6bfebaad2645285572f3adf2ae7db37da6dee13d0e08fcba6cc06479078096'
-ARCHIVE_PATCH_SHA256='9576a03a231188fc14fb24b0681bb7081031d3c3095be8f93e4211266135d12c'
+ARCHIVE_PATCH_SHA256='35af737129ca600d207bb4a2555571e6f0edd4b215b759e612d621d02b1de10a'
 
 
 def command(arguments,**kwargs):
@@ -30,13 +30,13 @@ def apply_task_archive_overlay(runtime,base_sha256):
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
         runtime/'src/backtest_data/remote/extra_cadence.py':'120d8e6f9e62c2dc979154afb92dc0db8d9a5a202c60a3c22476a08e575a48af',
-        runtime/'src/backtest_data/remote/worker.py':'e589f74fd8ce5f24b5525531d3175f6e8a9fb27d03614bd89c88b77ab6bb8bb3',
-        runtime/'src/backtest_data/ingestion/jobs.py':'d7524e40794d9b770026dfb94bddc0b8e0cb38b095363eef22a777a4da0a127a',
+        runtime/'src/backtest_data/remote/worker.py':'db0a7e1c815bb13a8267e4b6c524d4ca774ff506b615318857d8321061b0f985',
+        runtime/'src/backtest_data/ingestion/jobs.py':'44c4a2eb149880c3271bc136c7f2c43d4622a26b9e0dfbee53cc528c40c6944a',
         runtime/'src/backtest_data/prices/storage.py':'a4cd5d85066646bdf7377ba3654193bd738391d8d47a737367754e20f3b9eece',
         runtime/'src/backtest_data/prices/kis_overseas_storage.py':'daff43d39bb2fc62060f3340f961399ce1f120f4d199e44a32c81a86a7c6c68a',
         runtime/'src/backtest_data/prices/adapters/kis_overseas.py':'204f3ee621f320d43bda6912849a552145f41d295aa2c58f81b9b8092a0b1dac',
         runtime/'src/backtest_data/remote/checkpoint.py':'3ac332101c85db1dba0bdbb0a990dbbe36145b309c6ecd57e0c7f825fb4fde57',
-        runtime/'src/backtest_data/ingestion/supervisor.py':'6239aec7ab3e6709446485ad9803a3b17a56db5a3ce131de6680831b4723ab67',
+        runtime/'src/backtest_data/ingestion/supervisor.py':'9bd31d3288b85231cb8c07c0ab0210dba563986304b63cac1aa2bd680f6e4ae3',
     }
     for source in sources:
         canonical=source.read_text(encoding='utf-8')
