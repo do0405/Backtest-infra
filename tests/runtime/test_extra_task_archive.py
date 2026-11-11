@@ -132,3 +132,28 @@ def test_external_archive_rejects_bad_asset_before_fetch(archive, binding, tmp_p
     with pytest.raises(ValueError, match='external task archive'):
         archive.restore_shards(ref, index, tmp_path / 'resume', binding=binding, key=b'k' * 32,
                                fetch=lambda *args: pytest.fail('invalid asset fetched'))
+
+
+
+def test_market_status_counts_before_resume(archive):
+    tag = 'data-extra-forward-v1-000000747-r43073557117-a1'
+    tasks = [
+        {'source': 'kis', 'status': 'pending'},
+        {'source': 'kis', 'status': 'pending'},
+        {'source': 'kis', 'status': 'failed'},
+        {'source': 'kis_overseas', 'status': 'retry'},
+        {'source': 'kis_overseas', 'status': 'unsupported'},
+        {'source': 'kis_overseas', 'status': 'succeeded'},
+        {'source': 'kis', 'status': 'superseded'},
+    ]
+
+    assert archive.price_backlog_before_resume(tasks, previous_sequence=747, previous_tag=tag) == {
+        'status': 'extra_price_backlog_before_resume',
+        'previous_sequence': 747,
+        'previous_tag': tag,
+        'unfinished_tasks': 5,
+        'by_market': {
+            'KR': {'pending': 2, 'retry': 0, 'failed': 1, 'unsupported': 0},
+            'US': {'pending': 0, 'retry': 1, 'failed': 0, 'unsupported': 1},
+        },
+    }
