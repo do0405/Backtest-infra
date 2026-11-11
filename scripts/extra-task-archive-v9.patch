@@ -1,6 +1,6 @@
 --- a/src/backtest_data/remote/task_archive.py
 +++ b/src/backtest_data/remote/task_archive.py
-@@ -1,15 +1,22 @@
+@@ -1,20 +1,45 @@
  """Lossless task metadata in the existing encrypted resume ZIP; no SQL rows."""
  from collections import Counter
 +from contextlib import ExitStack
@@ -23,7 +23,30 @@
  FIELDS=('task_state','completed_task_ids','unfinished_task_ids','price_history_queue')
  MAX_LINE_BYTES=1024*1024
  MAX_EXPANDED_BYTES=1024**3
-@@ -46,17 +53,38 @@
+ MAX_ITEMS=4_000_000
+ KINDS=('task','completed','unfinished','history_source','history')
++
++def price_backlog_before_resume(tasks, *, previous_sequence, previous_tag):
++    """Summarize the restored price queue without exposing individual requests."""
++    market_by_source = {'kis': 'KR', 'kis_overseas': 'US'}
++    statuses = ('pending', 'retry', 'failed', 'unsupported')
++    by_market = {market: dict.fromkeys(statuses, 0) for market in market_by_source.values()}
++    for task in tasks:
++        status = task['status']
++        if status in statuses:
++            by_market[market_by_source[task['source']]][status] += 1
++    return {
++        'status': 'extra_price_backlog_before_resume',
++        'previous_sequence': previous_sequence,
++        'previous_tag': previous_tag,
++        'unfinished_tasks': sum(sum(counts.values()) for counts in by_market.values()),
++        'by_market': by_market,
++    }
++
+ 
+ def make_binding(ownership,stream_id,*,start_sequence):
+     return {'stream_id':stream_id,'start_sequence':start_sequence,'manifest_id':ownership['manifest_id'],'target_hash':ownership['target_hash'],'target_count':17758,
+@@ -46,17 +71,38 @@
          raise ValueError('original task outside archive source scope')
      dumps(value)
  
@@ -69,7 +92,7 @@
  
  def _digest(path):
      value=hashlib.sha256()
-@@ -67,19 +95,43 @@
+@@ -67,19 +113,43 @@
  def detach_checkpoint(checkpoint,root,*,binding):
      binding=deepcopy(_binding(binding))
      if 'task_state_archive' in checkpoint:raise ValueError('hydrate task archive before replacing its authority')
@@ -121,7 +144,7 @@
          for value in checkpoint.get('task_state',[]):
              _task(value,binding)
              if value['id'] in seen_ids or value['identity_hash'] in seen_hashes:raise ValueError('duplicate original archived task')
-@@ -87,12 +139,14 @@
+@@ -87,12 +157,14 @@
              if counts['task']>MAX_ITEMS:raise ValueError('task archive count bound exceeded')
              emit({'kind':'task','value':value})
          for field,kind,seen in [('completed_task_ids','completed',completed),('unfinished_task_ids','unfinished',unfinished)]:
@@ -136,7 +159,7 @@
          queue=checkpoint.get('price_history_queue',{})
          if not isinstance(queue,dict) or set(queue)-set(binding['owned_sources']):raise ValueError('owned original history queue required')
          for source,values in queue.items():
-@@ -102,72 +156,172 @@
+@@ -102,72 +174,172 @@
                  _job_id(value);counts['history']+=1
                  if counts['history']>MAX_ITEMS:raise ValueError('history archive count bound exceeded')
                  emit({'kind':'history','source':source,'value':value})
@@ -372,16 +395,18 @@
  import traceback
  sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
  
-@@ -28,7 +29,7 @@
+@@ -28,7 +29,9 @@
  from backtest_data.remote.identity import validate_raw_identity_index
  from backtest_data.remote.resume import LazyWindowResolver,window_snapshot,compact_windows
  from backtest_data.remote.paced_publication import publish_release
 -from backtest_data.remote.task_archive import make_binding,hydrate_checkpoint,stage_archive
-+from backtest_data.remote.task_archive import make_binding,hydrate_checkpoint,publishable_shards,restore_shards
++from backtest_data.remote.task_archive import (
++    hydrate_checkpoint, make_binding, price_backlog_before_resume, publishable_shards, restore_shards,
++)
  
  
  def publication_summary(head,tag,state):
-@@ -46,6 +47,7 @@
+@@ -46,6 +49,7 @@
  
  
  def main(argv=None):
@@ -389,7 +414,7 @@
      parser=argparse.ArgumentParser();parser.add_argument('--work',required=True,type=Path)
      parser.add_argument('--budget-seconds',type=int,default=4800);args=parser.parse_args(argv)
      if not 30<=args.budget_seconds<=4800:raise ValueError('bounded extra-source batch required')
-@@ -74,10 +76,25 @@
+@@ -74,14 +78,35 @@
          checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
          previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
      task_binding=make_binding(configuration,stream,start_sequence=sequence)
@@ -416,7 +441,17 @@
      if checkpoint.get('handoff_id')!=configuration['handoff_id'] or checkpoint.get('forward_start')!=configuration['forward_start']:
          raise ValueError('explicit checkpoint handoff and forward scope required')
      if any(task['source'] not in {'kis','kis_overseas'} or task['request'].get('output_start','')<configuration['forward_start'] for task in checkpoint.get('task_state',[])):
-@@ -127,13 +144,15 @@
+         raise ValueError('extra queue outside forward ownership')
++    if prior is not None:
++        print(json.dumps(price_backlog_before_resume(
++            checkpoint.get('task_state', []),
++            previous_sequence=prior['end_sequence'],
++            previous_tag=prior_tag,
++        )), flush=True)
+     readiness=configuration.get('quota_partition_ready',{})
+     allowance=None;fsc_allowance=None
+     if readiness.get('alpha_vantage') is True and quota_ready(configuration,'alpha_vantage',utcnow()):
+@@ -127,13 +152,15 @@
          checkpoint['raw_identity_archive']=archive.checkpoint_state()
          resolver=LazyWindowResolver(engine,gh=gh,repo=repo,stream=stream,bootstrap_hash=binding['sha256'],key=key,
              work=work/'lazy-resume',raw_root=raw)
@@ -434,7 +469,7 @@
          head=result['head'];state=unpack(read_manifest(store/'bundles'/head['bundle_id'])['checkpoint'])
          state.update(handoff_id=configuration['handoff_id'],forward_start=configuration['forward_start'])
          tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
-@@ -143,8 +162,14 @@
+@@ -143,8 +170,14 @@
              scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
              resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
              state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
@@ -450,7 +485,7 @@
          # Initial bootstrap did not occupy the state path; all files use fresh
          # names in this generation even when a predecessor was restored.
          zip_store(resumed,work/'next-resume.zip')
-@@ -164,7 +189,7 @@
+@@ -164,7 +197,7 @@
              'created_at':utcnow().isoformat(),'coverage_complete':False}
          commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
          read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
