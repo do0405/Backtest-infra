@@ -255,3 +255,33 @@ def test_coalesced_page_does_not_mark_a_missing_latest_bar_as_done(cadence, monk
     assert supervisor._record_kis_page(None, {'output_end': latest}, {}, outcome, window) == ('unsupported', 0, 1)
     assert finished == [prior]
     assert outcome['normalized_rows_total'] == 0
+
+
+def test_extra_kis_lanes_share_one_token(cadence, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from backtest_data.ingestion import supervisor
+
+    requests = []
+    closed = []
+
+    class HTTP:
+        def __init__(self, engine):
+            pass
+
+        def request(self, source, method, url, **kwargs):
+            requests.append((source, method, url))
+            return SimpleNamespace(content=json.dumps({'access_token': 'fixture-token', 'expires_in': 3600}).encode())
+
+        def close(self):
+            closed.append(True)
+
+    key = SimpleNamespace(reveal=lambda: 'fixture')
+    monkeypatch.setattr(supervisor, 'ProviderHTTP', HTTP)
+    monkeypatch.setattr(supervisor, 'load_credentials',
+                        lambda **kwargs: SimpleNamespace(kis_app_key=key, kis_app_secret=key))
+    with supervisor.shared_kis_price_client(None) as kis:
+        assert kis._headers()['authorization'] == 'Bearer fixture-token'
+        assert kis._headers('HHDFS76240000')['authorization'] == 'Bearer fixture-token'
+    assert [method for _, method, _ in requests] == ['POST']
+    assert closed == [True]

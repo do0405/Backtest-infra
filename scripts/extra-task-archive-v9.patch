@@ -809,12 +809,13 @@
  
 --- a/src/backtest_data/remote/worker.py
 +++ b/src/backtest_data/remote/worker.py
-@@ -1,12 +1,14 @@
+@@ -1,12 +1,15 @@
  """Dedicated remote entry point; no .env discovery and no ownership defaults."""
  import argparse
 +from collections import Counter
  from copy import deepcopy
  from datetime import datetime, timezone
++from functools import partial
  import json
  import math
 +import re
@@ -825,7 +826,7 @@
  from ..db import make_engine, transaction, utcnow
  from ..ingestion.jobs import logical_request, plan_job, stable_hash
  from ..ingestion.models import CollectionJob, TargetUniverseManifest
-@@ -26,7 +28,8 @@
+@@ -26,7 +29,8 @@
                postprocess=None, postprocess_budget_seconds=60,
                source_handlers=None,source_handler_budget_seconds=120,rate_admission=None,
                acquisition_deadline=None,phase_callback=None,
@@ -835,7 +836,7 @@
      slots = validate_ownership(ownership)
      if not 0 <= budget_seconds <= 14400 or budget_seconds==0 and acquisition_deadline is None:
          raise ValueError("bounded remote execution window required")
-@@ -39,7 +42,12 @@
+@@ -39,7 +43,12 @@
      handler_ceiling=budget_seconds/3 if core_slots else budget_seconds-reserved_post
      reserved_handlers=min(source_handler_budget_seconds,handler_ceiling) if source_handlers else 0
      if reserved_post<0 or reserved_handlers<0:raise ValueError('bounded processing reservation required')
@@ -849,7 +850,7 @@
      archive_binding=None
      if task_archive_output_root is not None or 'task_state_archive' in checkpoint:
          from .task_archive import make_binding,hydrate_checkpoint
-@@ -48,6 +56,18 @@
+@@ -48,6 +57,25 @@
              if task_archive_input_root is None or task_archive_input_sequence is None:raise ValueError('authenticated resume task archive root and generation required')
              incoming_binding=make_binding({**ownership,'provider_slots':slots},stream_id,start_sequence=task_archive_input_sequence)
              checkpoint=hydrate_checkpoint(checkpoint,task_archive_input_root,binding=incoming_binding)
@@ -865,10 +866,17 @@
 +        checkpoint['extra_daily_queue_cleanup'] = 1
 +        print(json.dumps({'status':'extra_legacy_queue_migrated','before':{
 +            ':'.join(key): count for key,count in sorted(counts.items())}, **cleanup}),flush=True)
++    requeued_access_errors = 0
++    if manage_price_queue:
++        for task in checkpoint.get('task_state', []):
++            if (task['source'] in {'kis','kis_overseas'} and task['domain'] == 'prices'
++                    and task['status'] == 'unsupported' and task['checkpoint'].get('reason') == '403'):
++                task['status'] = 'retry'
++                requeued_access_errors += 1
      if 'raw_identity_archive' in checkpoint:
          if 'raw_identity_index' in checkpoint:raise ValueError('one original raw identity authority required')
          from .raw_registration import validate_archive_binding
-@@ -84,6 +104,7 @@
+@@ -84,6 +112,7 @@
          if scope["output_start"] != "2016-01-01" or scope["output_end"] != "2026-10-07": raise ValueError("original backfill scope must remain intact")
          before = {name: set(session.scalars(select(list(table.primary_key.columns)[0]))) for name, table in registry.items()}
          task_jobs = {}
@@ -876,7 +884,7 @@
          for spec in planned_jobs:
              dumps(spec)
              if ownership.get('version')==2 and (spec['request'].get('output_start','')<ownership['forward_start'] or
-@@ -95,26 +116,53 @@
+@@ -95,26 +124,55 @@
              if identity in completed: continue
              job = plan_job(session, source=spec["source"], domain=spec["domain"], entity_id=spec["entity_id"], request=spec["request"], priority=spec.get("priority",10))
              task_jobs[identity] = job.id
@@ -910,7 +918,7 @@
 +            'remaining_seconds':max(0,round(deadline-setup_finished))}),flush=True)
      outcomes = []
      phase('acquisition_started')
-     from ..ingestion.supervisor import run_collection
+-    from ..ingestion.supervisor import run_collection
 -    for position,slot in enumerate(core_slots):
 -        remaining = (deadline - time.monotonic() - reserved_post - reserved_handlers)/(len(core_slots)-position)
 -        if remaining <= 0: break
@@ -921,13 +929,16 @@
 -        else:
 -            outcomes.append(run_collection(engine, raw_root, market=slot["market"], domain=slot["domain"],
 -                                           budget_seconds=remaining, mode="incremental", source_filter=[slot["source"]]))
++    from ..ingestion.supervisor import run_collection, shared_kis_price_client
 +    if split_prices and core_slots and all(slot['source'] in {'kis','kis_overseas'} for slot in core_slots):
 +        from .extra_cadence import run_price_slots
 +        cutoff=deadline-reserved_post-reserved_handlers
 +        remaining=cutoff-time.monotonic()
 +        if remaining>0:
-+            outcomes.extend(run_price_slots(run_collection,engine,raw_root,core_slots,budget_seconds=remaining,
-+                as_of=price_as_of,hard_deadline=cutoff,history_ids=price_selected))
++            with shared_kis_price_client(engine) as kis:
++                collect = partial(run_collection, kis_client=kis)
++                outcomes.extend(run_price_slots(collect,engine,raw_root,core_slots,budget_seconds=remaining,
++                    as_of=price_as_of,hard_deadline=cutoff,history_ids=price_selected))
 +    else:
 +        for position,slot in enumerate(core_slots):
 +            remaining = (deadline - time.monotonic() - reserved_post - reserved_handlers)/(len(core_slots)-position)
@@ -942,7 +953,7 @@
      postprocess_state={}
      if source_handlers and deadline-time.monotonic()>reserved_post:
          postprocess_state=source_handlers(engine,raw_root,manifest_id=scope['manifest_id'],slots=slots,
-@@ -140,24 +188,50 @@
+@@ -140,24 +198,50 @@
          # ownership/lease/fencing authority never enter the payload.
          all_owned=list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({s['source'] for s in slots}))))
          portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
@@ -959,7 +970,7 @@
 +                    for reason in result.get('blocked_sources',{}).values()})}
 +                for result in outcomes if 'lane' in result]
 +            print(json.dumps({'status':'extra_price_backlog_progress','historical':history,
-+                'deferred_unstarted_latest':deferred_latest,
++                'deferred_unstarted_latest':deferred_latest,'requeued_access_errors':requeued_access_errors,
 +                'latest_ready_dates':{source:price_ready_date(source,price_as_of).isoformat()
 +                    for source in ('kis','kis_overseas')},'lanes':lane_outcomes}),flush=True)
 +        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue','completed_price_observations','extra_daily_queue_cleanup'}},**postprocess_state,
@@ -1111,7 +1122,15 @@
      ordering = ([CollectionJob.attempts] if fair else []) + [CollectionJob.priority, CollectionJob.id]
 --- a/src/backtest_data/ingestion/supervisor.py
 +++ b/src/backtest_data/ingestion/supervisor.py
-@@ -20,7 +20,7 @@
+@@ -3,6 +3,7 @@
+ import time
+ import math
+ from collections import deque
++from contextlib import contextmanager
+ 
+ from sqlalchemy import func, select
+ 
+@@ -20,7 +21,7 @@
  from ..prices.kis_overseas_storage import store_kis_overseas_prices
  from .http import ProviderHTTP, ProviderError
  from .jobs import (acquire_job, complete_current_job as complete_job, heartbeat_current_job as heartbeat_job,
@@ -1120,7 +1139,7 @@
  from .models import CollectionJob
  
  
-@@ -56,8 +56,29 @@
+@@ -56,8 +57,39 @@
      return allowed, blocked
  
  
@@ -1145,13 +1164,29 @@
 +    return 'unsupported', 0, coalesced
 +
 +
++@contextmanager
++def shared_kis_price_client(engine):
++    """Use one account token and HTTP client for all Extra price lanes."""
++    http = ProviderHTTP(engine)
++    try:
++        yield KISQuotes(http, load_credentials(sources=['kis', 'kis_overseas']))
++    finally:
++        http.close()
++
++
  def run_collection(engine, raw_root, *, market, domain, budget_seconds=None, mode="incremental", source_filter=None,
 -        request_lane=None,request_day=None,request_ids=None):
-+        request_lane=None,request_day=None,request_ids=None,prepare_queue=True,execution_deadline=None):
++        request_lane=None,request_day=None,request_ids=None,prepare_queue=True,execution_deadline=None,kis_client=None):
      if domain not in {"prices", "fundamentals", "indices"}:
          raise ValueError("Unknown collection domain")
      if domain == "indices":
-@@ -88,18 +109,22 @@
+@@ -84,22 +116,27 @@
+         sources = [source for source in sources if source in source_filter]
+         blocked_sources = {source: reason for source, reason in blocked_sources.items() if source in source_filter}
+     blocked_stages = {}
+-    kis, dart, sec = KISQuotes(http, credentials), OpenDART(http, credentials), SEC(http, credentials)
++    kis = kis_client if kis_client is not None else KISQuotes(http, credentials)
++    dart, sec = OpenDART(http, credentials), SEC(http, credentials)
      alpaca = AlpacaData(http, credentials)
      owner, start, outcomes = new_id(), time.monotonic(), deque(maxlen=100)
      processed = 0
@@ -1181,7 +1216,7 @@
          lanes = deque(sorted(lane_order, key=lambda lane: durable_attempts.get(lane, 0)))
      setup_elapsed = time.monotonic() - start
      start = time.monotonic()
-@@ -114,7 +139,8 @@
+@@ -114,7 +151,8 @@
              'status':'lease_lost','reason':'lease_lost'})
          processed+=1
      try:
@@ -1191,7 +1226,7 @@
              with transaction(engine) as session:
                  lease = None
                  for _ in range(len(lanes)):
-@@ -132,6 +158,7 @@
+@@ -132,6 +170,7 @@
                      break
                  job = session.get(CollectionJob, lease.job_id)
                  source, job_domain, entity_id, request, checkpoint = job.source, job.domain, job.entity_id, dict(job.request), dict(job.checkpoint)
@@ -1199,7 +1234,7 @@
              try:
                  status, outcome = "succeeded", {}
                  if job_domain == "prices":
-@@ -158,6 +185,8 @@
+@@ -158,6 +197,8 @@
                              elif outcome.get("deferred_recent_start"):
                                  outcome["reason"] = "api_traversal_complete_recent_interval_deferred"
                              complete_job(session, lease, utcnow(), outcome, status=status)
@@ -1208,7 +1243,7 @@
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -176,8 +205,12 @@
+@@ -176,8 +217,12 @@
                              continue
                          end = date.fromisoformat(checkpoint.get("cursor_end") or request["output_end"])
                          anchor = datetime.fromisoformat(checkpoint["request_anchor"]) if checkpoint.get("request_anchor") else utcnow()
@@ -1222,7 +1257,7 @@
                          response, payload = kis.overseas_daily_prices(api_request)
                          with transaction(engine) as session:
                              heartbeat_job(session, lease, utcnow(), timedelta(minutes=5))
-@@ -187,8 +220,11 @@
+@@ -187,8 +232,11 @@
                              outcome["requested_output_end"] = request["output_end"]
                              outcome["rejected_total"] = checkpoint.get("rejected_total", 0) + outcome["rejected"]
                              outcome["source_rows_total"] = checkpoint.get("source_rows_total", 0) + outcome["source_row_count"]
@@ -1235,7 +1270,7 @@
                                  status, outcome["reason"] = "unsupported", "source_response_or_pagination_gap"
                              elif not outcome["traversal_complete"]:
                                  if not earliest or earliest > end.isoformat():
-@@ -203,6 +239,9 @@
+@@ -203,6 +251,9 @@
                              elif outcome["source_exhausted"]:
                                  outcome["reason"] = "source_exhausted_with_observed_history"
                              complete_job(session, lease, utcnow(), outcome, status=status)
@@ -1245,7 +1280,7 @@
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -210,16 +249,22 @@
+@@ -210,16 +261,22 @@
                          status, outcome = "unsupported", {"reason": "unregistered_price_source"}
                      else:
                          end = date.fromisoformat(checkpoint.get("cursor_end") or request["output_end"])
@@ -1271,7 +1306,7 @@
                                  status, outcome['reason'] = 'unsupported', 'source_response_or_pagination_gap'
                              elif not outcome['traversal_complete']:
                                  if not earliest or earliest > end.isoformat():
-@@ -234,6 +279,9 @@
+@@ -234,6 +291,9 @@
                              elif outcome['source_exhausted']:
                                  outcome['reason'] = 'source_exhausted_with_observed_history'
                              complete_job(session, lease, utcnow(), outcome, status=status)
@@ -1281,7 +1316,19 @@
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -296,7 +344,8 @@
+@@ -271,7 +331,10 @@
+             except ProviderError as exc:
+                 try:
+                     with transaction(engine) as session:
+-                        complete_job(session, lease, utcnow(), {**checkpoint, "reason": exc.code}, status="retry" if exc.retryable else "unsupported")
++                        # Account access failure cannot establish that a price is unavailable.
++                        retryable = exc.retryable or (kis_client is not None and source in {'kis', 'kis_overseas'} and exc.code == '403')
++                        complete_job(session, lease, utcnow(), {**checkpoint, "reason": exc.code},
++                                     status="retry" if retryable else "unsupported")
+                 except LeaseLost:
+                     record_lease_loss(lease,source,job_domain)
+                     continue
+@@ -296,7 +359,8 @@
          http.close()
      return {"status": "blocked" if not processed and blocked_sources else "partial", "processed_this_run": processed, "elapsed_seconds": round(time.monotonic() - start, 2),
              "setup_elapsed_seconds": round(setup_elapsed, 2), "budget_semantics": "execution_excludes_queue_planning",
