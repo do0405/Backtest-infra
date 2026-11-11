@@ -953,7 +953,7 @@
      postprocess_state={}
      if source_handlers and deadline-time.monotonic()>reserved_post:
          postprocess_state=source_handlers(engine,raw_root,manifest_id=scope['manifest_id'],slots=slots,
-@@ -140,24 +198,50 @@
+@@ -140,24 +198,52 @@
          # ownership/lease/fencing authority never enter the payload.
          all_owned=list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({s['source'] for s in slots}))))
          portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
@@ -1003,9 +1003,11 @@
 -                    forward_start=datetime.fromisoformat(ownership['forward_start']).date(),as_of=utcnow()),
 -                'planned_roots':len(planned_jobs),'coverage_complete':False}
 +                'source_progress':progress,'planned_roots':len(planned_jobs),'coverage_complete':False}
++            pending_by_status = Counter(task['status'] for task in durable_checkpoint['task_state']
++                                        if task['status'] not in {'succeeded','superseded'})
 +            print(json.dumps({'status':'extra_price_queue_lifecycle','planned_roots':len(planned_jobs),
 +                'retired_daily_jobs':retired,'retained_tasks':len(durable_checkpoint['task_state']),
-+                'unfinished_tasks':unfinished_count}),flush=True)
++                'unfinished_tasks':unfinished_count,'unfinished_by_status':pending_by_status}),flush=True)
          roots = {name: sorted(set(session.scalars(select(list(table.primary_key.columns)[0]))) - before[name]) for name, table in registry.items()}
 -        unfinished_count=len(durable_checkpoint['unfinished_task_ids'])
          if task_archive_output_root is not None:
@@ -1026,26 +1028,36 @@
  def stable_hash(value) -> str:
      return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
  
-@@ -17,6 +23,73 @@
+@@ -17,6 +23,92 @@
  def logical_request(request):
      # The target manifest binds coverage, while source request semantics bind work.
      return {key: value for key, value in request.items() if key != "manifest_id"}
 +
 +
-+def _daily_price_route(job):
++def _price_route(job):
 +    request = job.request
 +    lane = request.get('cadence_lane')
++    end = request.get('output_end')
 +    if (job.source not in {'kis', 'kis_overseas'} or job.domain != 'prices'
-+            or lane not in DAILY_PRICE_LANES or request.get('refresh_policy') != f'extra_{lane}_v6'
-+            or not request.get('output_end') or request.get('output_start') != request['output_end']):
++            or not end or request.get('refresh_policy') != f'extra_{lane}_v6'):
 +        return None
 +    fields = logical_request(request)
++    if lane == 'weekly_correction':
++        if fields.pop('correction_anchor', None) != end or not request.get('output_start'):
++            return None
++    elif lane not in DAILY_PRICE_LANES or request.get('output_start') != end:
++        return None
 +    for key in ('output_start', 'output_end', 'cadence_lane', 'refresh_policy'):
 +        del fields[key]
 +    return job.source, job.domain, job.entity_id, fields
 +
 +
-+def _daily_window_bounds(day, ready_day, lane):
++def _coalescing_bounds(job, ready_day, lane):
++    day = date.fromisoformat(job.request['output_end'])
++    if lane == 'correction':
++        start = date.fromisoformat(job.request['output_start'])
++        end = date.fromisoformat(job.checkpoint.get('cursor_end') or job.request['output_end'])
++        return start, end
 +    span = timedelta(days=MAX_COALESCED_PRICE_DAYS)
 +    if lane == 'latest':
 +        return day - span, day - timedelta(days=1)
@@ -1053,26 +1065,35 @@
 +
 +
 +def coalesce_price_window(job, candidates, *, ready_day, lane):
-+    day = date.fromisoformat(job.request['output_end'])
-+    start, end = _daily_window_bounds(day, ready_day, lane)
-+    route = _daily_price_route(job)
++    start, end = _coalescing_bounds(job, ready_day, lane)
++    route = _price_route(job)
 +    siblings = {}
 +    for candidate in candidates:
 +        if (candidate.id == job.id or candidate.status != 'pending' or candidate.attempts != 0
-+                or candidate.checkpoint or route is None or _daily_price_route(candidate) != route):
++                or candidate.checkpoint or candidate.request.get('cadence_lane') not in DAILY_PRICE_LANES
++                or route is None or _price_route(candidate) != route):
 +            continue
 +        candidate_day = date.fromisoformat(candidate.request['output_end'])
 +        if start <= candidate_day <= end:
 +            siblings[candidate.id] = candidate_day.isoformat()
++    if lane == 'correction':
++        # The correction owns its original range and pagination cursor.
++        return start, end, siblings
++    day = date.fromisoformat(job.request['output_end'])
 +    days = [day, *(date.fromisoformat(value) for value in siblings.values())]
 +    return min(days), max(days), siblings
 +
 +
 +def load_coalesced_price_window(session, job, *, ready_day, lane):
-+    if lane not in {'latest', 'history'} or job.checkpoint or _daily_price_route(job) is None:
++    job_lane = job.request.get('cadence_lane')
++    if lane == 'correction':
++        if job_lane != 'weekly_correction':
++            return None
++    elif lane not in {'latest', 'history'} or job_lane not in DAILY_PRICE_LANES or job.checkpoint:
 +        return None
-+    day = date.fromisoformat(job.request['output_end'])
-+    start, end = _daily_window_bounds(day, ready_day, lane)
++    if _price_route(job) is None:
++        return None
++    start, end = _coalescing_bounds(job, ready_day, lane)
 +    output_end = CollectionJob.request['output_end'].astext
 +    candidates = session.scalars(select(CollectionJob).where(
 +        CollectionJob.source == job.source, CollectionJob.domain == job.domain,
@@ -1100,7 +1121,7 @@
  
  
  def plan_job(session, *, source: str, domain: str, entity_id: str, request: dict, priority: int = 10):
-@@ -119,12 +192,15 @@
+@@ -119,12 +211,15 @@
          if request_lane not in {'latest','history','correction'} or type(request_day) is not date:
              raise ValueError('explicit bounded price execution lane/day required')
          lane=CollectionJob.request['cadence_lane'].astext
@@ -1139,7 +1160,7 @@
  from .models import CollectionJob
  
  
-@@ -56,8 +57,39 @@
+@@ -56,8 +57,44 @@
      return allowed, blocked
  
  
@@ -1147,6 +1168,11 @@
 +    observed = set(outcome.pop('observed_sessions'))
 +    outcome['normalized_rows_total'] = checkpoint.get('normalized_rows_total', 0) + len(observed)
 +    if window is None:
++        return None, len(observed), 0
++    if request.get('cadence_lane') == 'weekly_correction':
++        if outcome['response_valid'] and outcome['pagination_valid']:
++            coalesced = finish_observed_price_requests(session, window[2], observed)
++            return None, len(observed), coalesced
 +        return None, len(observed), 0
 +    if not outcome['response_valid'] or not outcome['pagination_valid']:
 +        outcome['reason'] = 'source_response_or_pagination_gap'
@@ -1180,7 +1206,7 @@
      if domain not in {"prices", "fundamentals", "indices"}:
          raise ValueError("Unknown collection domain")
      if domain == "indices":
-@@ -84,22 +116,27 @@
+@@ -84,22 +121,27 @@
          sources = [source for source in sources if source in source_filter]
          blocked_sources = {source: reason for source, reason in blocked_sources.items() if source in source_filter}
      blocked_stages = {}
@@ -1216,7 +1242,7 @@
          lanes = deque(sorted(lane_order, key=lambda lane: durable_attempts.get(lane, 0)))
      setup_elapsed = time.monotonic() - start
      start = time.monotonic()
-@@ -114,7 +151,8 @@
+@@ -114,7 +156,8 @@
              'status':'lease_lost','reason':'lease_lost'})
          processed+=1
      try:
@@ -1226,7 +1252,7 @@
              with transaction(engine) as session:
                  lease = None
                  for _ in range(len(lanes)):
-@@ -132,6 +170,7 @@
+@@ -132,6 +175,7 @@
                      break
                  job = session.get(CollectionJob, lease.job_id)
                  source, job_domain, entity_id, request, checkpoint = job.source, job.domain, job.entity_id, dict(job.request), dict(job.checkpoint)
@@ -1234,7 +1260,7 @@
              try:
                  status, outcome = "succeeded", {}
                  if job_domain == "prices":
-@@ -158,6 +197,8 @@
+@@ -158,6 +202,8 @@
                              elif outcome.get("deferred_recent_start"):
                                  outcome["reason"] = "api_traversal_complete_recent_interval_deferred"
                              complete_job(session, lease, utcnow(), outcome, status=status)
@@ -1243,7 +1269,7 @@
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -176,8 +217,12 @@
+@@ -176,8 +222,12 @@
                              continue
                          end = date.fromisoformat(checkpoint.get("cursor_end") or request["output_end"])
                          anchor = datetime.fromisoformat(checkpoint["request_anchor"]) if checkpoint.get("request_anchor") else utcnow()
@@ -1257,7 +1283,7 @@
                          response, payload = kis.overseas_daily_prices(api_request)
                          with transaction(engine) as session:
                              heartbeat_job(session, lease, utcnow(), timedelta(minutes=5))
-@@ -187,8 +232,11 @@
+@@ -187,8 +237,11 @@
                              outcome["requested_output_end"] = request["output_end"]
                              outcome["rejected_total"] = checkpoint.get("rejected_total", 0) + outcome["rejected"]
                              outcome["source_rows_total"] = checkpoint.get("source_rows_total", 0) + outcome["source_row_count"]
@@ -1270,7 +1296,7 @@
                                  status, outcome["reason"] = "unsupported", "source_response_or_pagination_gap"
                              elif not outcome["traversal_complete"]:
                                  if not earliest or earliest > end.isoformat():
-@@ -203,6 +251,9 @@
+@@ -203,6 +256,9 @@
                              elif outcome["source_exhausted"]:
                                  outcome["reason"] = "source_exhausted_with_observed_history"
                              complete_job(session, lease, utcnow(), outcome, status=status)
@@ -1280,7 +1306,7 @@
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -210,16 +261,22 @@
+@@ -210,16 +266,22 @@
                          status, outcome = "unsupported", {"reason": "unregistered_price_source"}
                      else:
                          end = date.fromisoformat(checkpoint.get("cursor_end") or request["output_end"])
@@ -1306,7 +1332,7 @@
                                  status, outcome['reason'] = 'unsupported', 'source_response_or_pagination_gap'
                              elif not outcome['traversal_complete']:
                                  if not earliest or earliest > end.isoformat():
-@@ -234,6 +291,9 @@
+@@ -234,6 +296,9 @@
                              elif outcome['source_exhausted']:
                                  outcome['reason'] = 'source_exhausted_with_observed_history'
                              complete_job(session, lease, utcnow(), outcome, status=status)
@@ -1316,7 +1342,7 @@
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -271,7 +331,10 @@
+@@ -271,7 +336,10 @@
              except ProviderError as exc:
                  try:
                      with transaction(engine) as session:
@@ -1328,7 +1354,7 @@
                  except LeaseLost:
                      record_lease_loss(lease,source,job_domain)
                      continue
-@@ -296,7 +359,8 @@
+@@ -296,7 +364,8 @@
          http.close()
      return {"status": "blocked" if not processed and blocked_sources else "partial", "processed_this_run": processed, "elapsed_seconds": round(time.monotonic() - start, 2),
              "setup_elapsed_seconds": round(setup_elapsed, 2), "budget_semantics": "execution_excludes_queue_planning",
