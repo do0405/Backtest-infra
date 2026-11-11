@@ -69,7 +69,7 @@ def test_retire_completed_daily_rows_without_losing_progress_or_live_requests(ca
     assert cadence.price_progress(MEMBERS, checkpoint, sources={'kis'}, forward_start=START, as_of=AS_OF) == proof
 
 
-def test_rolled_daily_backlog_cannot_grow_without_admission_capacity(cadence, monkeypatch):
+def test_full_history_queue_does_not_block_latest(cadence, monkeypatch):
     backlog = [task(entity, day, 'daily_latest') for day in ('2026-11-07', '2026-11-08')
                for entity in ('a', 'b')]
     monkeypatch.setattr(cadence, 'MAX_DAILY_JOBS_PER_LANE', 2)
@@ -78,7 +78,7 @@ def test_rolled_daily_backlog_cannot_grow_without_admission_capacity(cadence, mo
              request=dict(market='KR', symbol='a', manifest_id='fixture'))])
     jobs, progress = cadence.plan_price_cadence(MEMBERS, [], manifest_id='fixture', original_scope={},
         as_of=AS_OF, sources={'kis'}, checkpoint={'task_state': backlog}, forward_start=START, mappings={})
-    assert jobs == []
+    assert [job['request']['cadence_lane'] for job in jobs] == ['daily_latest']
     assert progress['source_progress']['kis']['first_unadmitted_date'] == '2026-11-09'
 
 
@@ -110,3 +110,77 @@ def test_unused_latest_time_is_available_to_history(cadence, monkeypatch):
     cadence.run_price_budget(collect, None, None, dict(source='kis', market='KR', domain='prices'),
                              budget_seconds=100, as_of=AS_OF, hard_deadline=100, history_ids=['job'])
     assert calls == [('latest', 60), ('history', 80), ('correction', 15)]
+
+
+def test_both_markets_run_latest_before_any_history(cadence, monkeypatch):
+    now = [0.]
+    calls = []
+    monkeypatch.setattr(cadence.time, 'monotonic', lambda: now[0])
+
+    def collect(*args, source_filter, request_lane, **kwargs):
+        calls.append((source_filter[0], request_lane))
+        now[0] += 1
+        return {}
+
+    slots = [dict(source='kis', market='KR', domain='prices'),
+             dict(source='kis_overseas', market='US', domain='prices')]
+    cadence.run_price_slots(collect, None, None, slots, budget_seconds=100,
+                            as_of=AS_OF, hard_deadline=100, history_ids={})
+    assert calls[:4] == [('kis', 'latest'), ('kis_overseas', 'latest'),
+                         ('kis', 'history'), ('kis_overseas', 'history')]
+
+
+def test_legacy_cleanup_preserves_attempted_and_nonidentical_jobs(cadence):
+    finished = task('a', '2026-11-09', 'daily_latest', status='succeeded')
+    duplicate = task('a', '2026-11-09', 'daily_catchup')
+    attempted = task('b', '2026-11-09', 'daily_catchup', status='retry')
+    weekend = task('c', '2026-11-08', 'daily_catchup')
+    weekend['attempts'] = duplicate['attempts'] = 0
+    attempted['attempts'] = 2
+    checkpoint = dict(task_state=[finished, duplicate, attempted, weekend],
+                      price_history_queue={'kis': [duplicate['id'], attempted['id'], weekend['id']]})
+    assert cadence.clean_legacy_daily_queue(checkpoint, as_of=AS_OF) == {
+        'duplicate_unstarted': 1, 'weekend_unstarted': 1}
+    assert checkpoint['task_state'] == [finished, attempted]
+    assert checkpoint['price_history_queue']['kis'] == [attempted['id']]
+
+
+def test_new_untouched_latest_jobs_remain_plannable_instead_of_persisting(cadence):
+    untouched = task('a', '2026-11-10', 'daily_latest')
+    progressed = task('b', '2026-11-10', 'daily_latest', status='retry')
+    old = task('c', '2026-11-09', 'daily_latest')
+    untouched['attempts'] = old['attempts'] = 0
+    progressed['attempts'] = 1
+    rows, count = cadence.defer_unstarted_latest([untouched, progressed, old],
+                                                 {untouched['id'], progressed['id']})
+    assert (rows, count) == ([progressed, old], 1)
+
+
+def test_history_reduction_requires_actual_source_rows(cadence):
+    old = [task(name, '2026-11-09', 'daily_latest') for name in ('a', 'b', 'c')]
+    old[0]['checkpoint']['source_rows_total'] = 2
+    after = [dict(old[0], status='succeeded', checkpoint={'source_rows_total': 6}),
+             dict(old[1], status='unsupported'), old[2]]
+    assert cadence.history_progress(old, after, as_of=AS_OF) == {
+        'starting': 3, 'succeeded_with_rows': 1, 'succeeded_without_rows': 0,
+        'unsupported': 1, 'source_rows': 4, 'still_unfinished': 2}
+
+
+def test_today_catchup_alias_is_served_as_latest(cadence):
+    from sqlalchemy.dialects import postgresql
+    from backtest_data.ingestion.jobs import acquire_job
+
+    class Session:
+        def scalar(self, statement):
+            self.sql = str(statement.compile(dialect=postgresql.dialect(),
+                                             compile_kwargs={'literal_binds': True}))
+
+    old = task('a', '2026-11-09', 'daily_catchup')
+    current = task('b', '2026-11-10', 'daily_catchup')
+    assert cadence.history_rotation([current, old], [], source='kis', as_of=AS_OF)[1] == [old['id']]
+    session = Session()
+    from datetime import timedelta
+    acquire_job(session, 'worker', AS_OF, timedelta(minutes=5), sources=['kis'], domains=['prices'],
+                request_lane='latest', request_day=date(2026, 11, 10))
+    assert "request->>'cadence_lane' IN ('daily_latest','daily_catchup')" in session.sql
+    assert "'2026-11-10'" in session.sql

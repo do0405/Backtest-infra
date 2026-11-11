@@ -364,7 +364,15 @@
 +        pending.rename(destination)
 --- a/scripts/remote_extended_cycle.py
 +++ b/scripts/remote_extended_cycle.py
-@@ -28,7 +28,7 @@
+@@ -6,6 +6,7 @@
+ from pathlib import Path
+ import shutil
+ import sys
++import time
+ import traceback
+ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
+ 
+@@ -28,7 +29,7 @@
  from backtest_data.remote.identity import validate_raw_identity_index
  from backtest_data.remote.resume import LazyWindowResolver,window_snapshot,compact_windows
  from backtest_data.remote.paced_publication import publish_release
@@ -373,7 +381,15 @@
  
  
  def publication_summary(head,tag,state):
-@@ -74,10 +74,25 @@
+@@ -46,6 +47,7 @@
+ 
+ 
+ def main(argv=None):
++    acquisition_deadline=time.monotonic()+100*60
+     parser=argparse.ArgumentParser();parser.add_argument('--work',required=True,type=Path)
+     parser.add_argument('--budget-seconds',type=int,default=4800);args=parser.parse_args(argv)
+     if not 30<=args.budget_seconds<=4800:raise ValueError('bounded extra-source batch required')
+@@ -74,10 +76,25 @@
          checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
          previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
      task_binding=make_binding(configuration,stream,start_sequence=sequence)
@@ -400,7 +416,25 @@
      if checkpoint.get('handoff_id')!=configuration['handoff_id'] or checkpoint.get('forward_start')!=configuration['forward_start']:
          raise ValueError('explicit checkpoint handoff and forward scope required')
      if any(task['source'] not in {'kis','kis_overseas'} or task['request'].get('output_start','')<configuration['forward_start'] for task in checkpoint.get('task_state',[])):
-@@ -143,8 +158,14 @@
+@@ -127,13 +144,15 @@
+         checkpoint['raw_identity_archive']=archive.checkpoint_state()
+         resolver=LazyWindowResolver(engine,gh=gh,repo=repo,stream=stream,bootstrap_hash=binding['sha256'],key=key,
+             work=work/'lazy-resume',raw_root=raw)
++        cycle_as_of=utcnow()
+         with raw_identity_registration(archive):
+-            result=run_cycle(engine,raw,ownership=configuration,planned_jobs=partial(forward_jobs,engine,configuration,as_of=utcnow()),
++            result=run_cycle(engine,raw,ownership=configuration,planned_jobs=partial(forward_jobs,engine,configuration,as_of=cycle_as_of),
+                 incoming_bundles=[],output_root=work/'outgoing',transport_root=store,stream_id=stream,sequence=sequence,
+                 checkpoint=checkpoint,budget_seconds=args.budget_seconds,max_private_bytes=MAX_PRIVATE_ASSET,
+                 previous_bundle_id=previous,source_handlers=partial(run_owned_handlers,resume_resolver=resolver),source_handler_budget_seconds=args.budget_seconds,
+                 rate_admission=lambda session:configure_rate_partitions(session,allowance,fsc_allowance=fsc_allowance,binding_id=configuration['handoff_id']),postprocess=None,
+-                task_archive_output_root=work/'task-archive-output')
++                task_archive_output_root=work/'task-archive-output',price_as_of=cycle_as_of,
++                acquisition_deadline=acquisition_deadline)
+         head=result['head'];state=unpack(read_manifest(store/'bundles'/head['bundle_id'])['checkpoint'])
+         state.update(handoff_id=configuration['handoff_id'],forward_start=configuration['forward_start'])
+         tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
+@@ -143,8 +162,14 @@
              scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
              resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
              state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
@@ -416,7 +450,7 @@
          # Initial bootstrap did not occupy the state path; all files use fresh
          # names in this generation even when a predecessor was restored.
          zip_store(resumed,work/'next-resume.zip')
-@@ -164,7 +185,7 @@
+@@ -164,7 +189,7 @@
              'created_at':utcnow().isoformat(),'coverage_complete':False}
          commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
          read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
@@ -427,7 +461,7 @@
              target='main',control_target=True,title='Encrypted extra-source checkpoint '+str(head['sequence']),
 --- a/src/backtest_data/remote/extra_cadence.py
 +++ b/src/backtest_data/remote/extra_cadence.py
-@@ -1,15 +1,22 @@
+@@ -1,20 +1,27 @@
  """Fresh Extra price/official plans; immutable old requests remain untouched."""
 +from collections import Counter
  from copy import deepcopy
@@ -452,6 +486,12 @@
          raise ValueError('bounded distinct price history rotation required')
      current=provider_ready_date(source,as_of).isoformat()
      retained={task['id']:task for task in tasks if task['source']==source and task['domain']=='prices'
+         and task['status'] in {'pending','retry','running'} and task['request'].get('cadence_lane')!='weekly_correction'
+-        and not (task['request'].get('cadence_lane')=='daily_latest' and task['request']['output_end']==current)}
++        and not (task['request'].get('cadence_lane') in DAILY_LANES and task['request']['output_end']==current)}
+     def due(task):
+         retry=task.get('checkpoint',{}).get('retry_after')
+         if retry is None:return True
 @@ -24,7 +31,8 @@
      eligible={identity for identity,task in retained.items() if due(task)}
      queue=[identity for identity in previous if identity in retained]
@@ -462,27 +502,64 @@
      return queue,[identity for identity in queue if identity in eligible][:limit]
  
  
-@@ -41,12 +49,17 @@
- def run_price_budget(collector,engine,raw_root,slot,*,budget_seconds,as_of,hard_deadline,history_ids=None):
-     deadline=min(time.monotonic()+budget_seconds,hard_deadline);day=provider_ready_date(slot['source'],as_of)
-     outcomes=[]
-+    unused_latest=0
-     for lane,share in price_execution_shares(budget_seconds):
+@@ -38,23 +46,57 @@
+     return [('latest',seconds*3/5),('history',seconds/4),('correction',seconds*3/20)]
+ 
+ 
+-def run_price_budget(collector,engine,raw_root,slot,*,budget_seconds,as_of,hard_deadline,history_ids=None):
+-    deadline=min(time.monotonic()+budget_seconds,hard_deadline);day=provider_ready_date(slot['source'],as_of)
+-    outcomes=[]
+-    for lane,share in price_execution_shares(budget_seconds):
 -        available=deadline-time.monotonic()
-+        started=time.monotonic()
-+        available=deadline-started
-         if available<=0:break
-+        allowance=min(share+(unused_latest if lane=='history' else 0),available)
-         outcomes.append(collector(engine,raw_root,market=slot['market'],domain=slot['domain'],
+-        if available<=0:break
+-        outcomes.append(collector(engine,raw_root,market=slot['market'],domain=slot['domain'],
 -            budget_seconds=min(share,available),mode='incremental',source_filter=[slot['source']],request_lane=lane,request_day=day,
-+            budget_seconds=allowance,mode='incremental',source_filter=[slot['source']],request_lane=lane,request_day=day,
-             **({'request_ids':history_ids} if lane=='history' and history_ids is not None else {})))
-+        if lane=='latest':
-+            unused_latest=max(0,allowance-(time.monotonic()-started))
+-            **({'request_ids':history_ids} if lane=='history' and history_ids is not None else {})))
++def run_price_slots(collector, engine, raw_root, slots, *, budget_seconds, as_of, hard_deadline, history_ids):
++    """Give each source its latest-price turn before running any historical lane."""
++    deadline = min(time.monotonic() + budget_seconds, hard_deadline)
++    per_source = budget_seconds / len(slots)
++    outcomes = []
++    unused_latest = Counter()
++    for lane, share in price_execution_shares(per_source):
++        for slot in slots:
++            source = slot['source']
++            started = time.monotonic()
++            if started >= deadline:
++                return outcomes
++            allowance = min(share + (unused_latest[source] if lane == 'history' else 0), deadline - started)
++            result = collector(engine, raw_root, market=slot['market'], domain=slot['domain'],
++                budget_seconds=allowance, mode='incremental', source_filter=[source],
++                request_lane=lane, request_day=provider_ready_date(source, as_of),
++                prepare_queue=lane == 'latest', execution_deadline=deadline,
++                **({'request_ids': history_ids[source]} if lane == 'history' and source in history_ids else {}))
++            outcomes.append({**result, 'lane': lane, 'lane_source': source})
++            if lane == 'latest':
++                unused_latest[source] = max(0, allowance - (time.monotonic() - started))
      return outcomes
++
++
++def run_price_budget(collector, engine, raw_root, slot, *, budget_seconds, as_of, hard_deadline, history_ids=None):
++    return run_price_slots(collector, engine, raw_root, [slot], budget_seconds=budget_seconds,
++        as_of=as_of, hard_deadline=hard_deadline, history_ids={} if history_ids is None else {slot['source']: history_ids})
++
++
++def _advance_covered(day, until, covered):
++    while day < until:
++        next_day = day + timedelta(days=1)
++        if next_day.weekday() < 5 and not covered(next_day):
++            break
++        day = next_day
++    return day
++
++
++def _weekday(day):
++    while day.weekday() >= 5:
++        day += timedelta(days=1)
++    return day
  
  
-@@ -54,7 +67,9 @@
+ def price_progress(members,checkpoint,*,sources,forward_start,as_of):
      result={}
      for source in sorted(sources):
          expected={row['security_id'] for row in members if row['market']==('KR' if source=='kis' else 'US')}
@@ -493,7 +570,21 @@
          for task in checkpoint.get('task_state',[]):
              if task['source']!=source or task['domain']!='prices' or task['entity_id'] not in expected:continue
              request=task['request'];start=date.fromisoformat(request['output_start']);end=date.fromisoformat(request['output_end'])
-@@ -86,23 +101,108 @@
+@@ -76,9 +118,10 @@
+         cutoff=max(cutoff,forward_start-timedelta(days=1))
+         completed_calendar=as_of.astimezone(ZoneInfo('Asia/Seoul' if source=='kis' else 'America/New_York')).date()-timedelta(days=1)
+         if cutoff>completed_calendar:raise ValueError('future source watermark')
+-        while cutoff<current and covered(cutoff+timedelta(days=1),'terminal'):cutoff+=timedelta(days=1)
+-        missing=cutoff+timedelta(days=1)
+-        while missing<current and covered(missing,'admitted'):missing+=timedelta(days=1)
++        cutoff=_advance_covered(cutoff,current,lambda day:covered(day,'terminal'))
++        missing=_weekday(cutoff+timedelta(days=1))
++        while missing<current and covered(missing,'admitted'):
++            missing=_weekday(missing+timedelta(days=1))
+         result[source]={'expected_entities':len(expected),'request_completed_through':cutoff.isoformat(),
+             'first_unadmitted_date':missing.isoformat(),'unsupported_entities':len(unsupported),
+             'numeric_observed_entities':len(numeric),'valid_empty_entities':len(empty),
+@@ -86,24 +129,191 @@
      return result
  
  
@@ -506,6 +597,86 @@
 +        request.pop('cadence_lane')
 +        request.pop('refresh_policy')
 +    return stable_hash([job['source'], job['domain'], job['entity_id'], request])
++
++
++def _managed_daily(task):
++    request = task['request']
++    lane = request.get('cadence_lane')
++    return (task['source'] in {'kis', 'kis_overseas'} and task['domain'] == 'prices'
++            and lane in DAILY_LANES and request.get('refresh_policy') == f'extra_{lane}_v6'
++            and isinstance(request.get('output_end'), str)
++            and request.get('output_start') == request['output_end'])
++
++
++def _unstarted(task):
++    return task['status'] == 'pending' and task.get('attempts') == 0 and not task.get('checkpoint')
++
++
++def clean_legacy_daily_queue(checkpoint, *, as_of):
++    """Collapse only untouched exact aliases and untouched past weekend requests."""
++    rows = checkpoint.get('task_state', [])
++    untouched = []
++    represented = set()
++    for task in rows:
++        if not _managed_daily(task):
++            continue
++        if _unstarted(task):
++            untouched.append(task)
++        elif task['status'] in LIVE_STATUSES | {'succeeded'}:
++            represented.add(_daily_identity(task))
++    current = {source: provider_ready_date(source, as_of) for source in ('kis', 'kis_overseas')}
++    # Keep the latest lane for today's untouched aliases so it retains priority.
++    untouched.sort(key=lambda task: task['request']['cadence_lane'] != 'daily_latest')
++    removed = set()
++    counts = {'duplicate_unstarted': 0, 'weekend_unstarted': 0}
++    for task in untouched:
++        day = date.fromisoformat(task['request']['output_end'])
++        if day < current[task['source']] and day.weekday() >= 5:
++            counts['weekend_unstarted'] += 1
++        else:
++            identity = _daily_identity(task)
++            if identity not in represented:
++                represented.add(identity)
++                continue
++            counts['duplicate_unstarted'] += 1
++        removed.add(task['id'])
++    checkpoint['task_state'] = [task for task in rows if task['id'] not in removed]
++    if removed and 'price_history_queue' in checkpoint:
++        checkpoint['price_history_queue'] = {
++            source: [job_id for job_id in queue if job_id not in removed]
++            for source, queue in checkpoint['price_history_queue'].items()
++        }
++    return counts
++
++
++def defer_unstarted_latest(tasks, latest_ids):
++    """Leave never-attempted fresh work discoverable through the date planner."""
++    retained = [task for task in tasks if task['id'] not in latest_ids or not _unstarted(task)]
++    return retained, len(tasks) - len(retained)
++
++
++def history_progress(before, after, *, as_of):
++    current = {source: provider_ready_date(source, as_of).isoformat() for source in ('kis', 'kis_overseas')}
++    def row_count(task):
++        evidence = task['checkpoint']
++        return evidence.get('source_rows_total', evidence.get('source_row_count', 0))
++
++    backlog = {task['id']: row_count(task) for task in before if task['status'] in LIVE_STATUSES
++               and task['source'] in current and task['domain'] == 'prices'
++               and task['request'].get('output_end', '9999-12-31') < current[task['source']]}
++    result = dict(starting=len(backlog), succeeded_with_rows=0, succeeded_without_rows=0,
++                  unsupported=0, source_rows=0, still_unfinished=len(backlog))
++    for task in after:
++        if task['id'] not in backlog:
++            continue
++        if task['status'] == 'unsupported':
++            result['unsupported'] += 1
++        elif task['status'] == 'succeeded':
++            count = row_count(task)
++            result['succeeded_with_rows' if count > 0 else 'succeeded_without_rows'] += 1
++            result['source_rows'] += max(0, count - backlog[task['id']])
++            result['still_unfinished'] -= 1
++    return result
 +
 +
 +def _daily_queue(members, checkpoint, sources, current, candidate_days):
@@ -521,12 +692,12 @@
 +        request = task['request']
 +        lane = request.get('cadence_lane')
 +        day = request.get('output_end')
-+        if lane not in DAILY_LANES or request.get('output_start') != day:
-+            continue
 +        if task['status'] != 'superseded' and day in candidate_days[source]:
 +            represented.add(_daily_identity(task))
++        if lane not in DAILY_LANES or request.get('output_start') != day:
++            continue
 +        if task['status'] in LIVE_STATUSES:
-+            live_lane = 'daily_latest' if lane == 'daily_latest' and day == current[source] else 'daily_catchup'
++            live_lane = 'daily_latest' if day == current[source] else 'daily_catchup'
 +            pending[source, live_lane] += 1
 +    return capacities, pending, represented
 +
@@ -572,7 +743,9 @@
      progress=price_progress(members,checkpoint,sources=sources,forward_start=forward_start,as_of=as_of)
 +    current = {source: provider_ready_date(source, as_of) for source in sources}
 +    missing = {source: date.fromisoformat(progress[source]['first_unadmitted_date']) for source in sources}
-+    candidate_days = {source: {current[source].isoformat(), missing[source].isoformat()} for source in sources}
++    friday = {source: day - timedelta(days=(day.weekday()-4)%7) for source, day in current.items()}
++    candidate_days = {source: {current[source].isoformat(), missing[source].isoformat(), friday[source].isoformat()}
++                      for source in sources}
 +    current_labels = {source: day.isoformat() for source, day in current.items()}
 +    capacities, pending, represented = _daily_queue(members, checkpoint, sources, current_labels, candidate_days)
      templates=build_update_jobs(members,issuers,manifest_id=manifest_id,original_scope=original_scope,
@@ -584,41 +757,190 @@
 -        missing=date.fromisoformat(progress[source]['first_unadmitted_date'])
 -        if missing<current:windows.append(('daily_catchup',missing,missing,2))
 -        friday=current-timedelta(days=(current.weekday()-4)%7)
+-        if friday>=forward_start:windows.append(('weekly_correction',max(forward_start,friday-timedelta(days=13)),friday,5))
 +        source=template['source'];day=current[source]
 +        windows=[('daily_latest',day,day,0)] if day>=forward_start and date.fromisoformat(progress[source]['request_completed_through'])<day else []
 +        gap=missing[source]
 +        if gap<day:windows.append(('daily_catchup',gap,gap,2))
-+        friday=day-timedelta(days=(day.weekday()-4)%7)
-         if friday>=forward_start:windows.append(('weekly_correction',max(forward_start,friday-timedelta(days=13)),friday,5))
++        anchor=friday[source]
++        if anchor>=forward_start:windows.append(('weekly_correction',max(forward_start,anchor-timedelta(days=13)),anchor,5))
          for lane,start,end,priority in windows:
 +            if lane in DAILY_LANES:
 +                capacity = capacities[source]
-+                if pending[source, lane] >= capacity or pending[source, 'daily_latest']+pending[source, 'daily_catchup'] >= 2*capacity:
++                if pending[source, lane] >= capacity:
 +                    continue
              job=deepcopy(template);job['priority']=priority;request=job['request']
              request.update(output_start=start.isoformat(),output_end=end.isoformat(),cadence_lane=lane,
                  refresh_policy='extra_'+lane+'_v6')
+-            if lane=='weekly_correction':request['correction_anchor']=friday.isoformat()
++            if lane=='weekly_correction':request['correction_anchor']=anchor.isoformat()
++            identity = _daily_identity(job)
++            if identity in represented:
++                continue
++            represented.add(identity)
 +            if lane in DAILY_LANES:
-+                identity = _daily_identity(job)
-+                if identity in represented:
-+                    continue
-+                represented.add(identity)
 +                pending[source, lane] += 1
-             if lane=='weekly_correction':request['correction_anchor']=friday.isoformat()
              jobs.append(job)
      return jobs,{'policy':'extra_split_daily_weekly_v6','source_progress':progress,'planned_roots':len(jobs),'coverage_complete':False}
+ 
 --- a/src/backtest_data/remote/worker.py
 +++ b/src/backtest_data/remote/worker.py
-@@ -140,7 +140,7 @@
+@@ -1,12 +1,14 @@
+ """Dedicated remote entry point; no .env discovery and no ownership defaults."""
+ import argparse
++from collections import Counter
+ from copy import deepcopy
+ from datetime import datetime, timezone
+ import json
+ import math
++import re
+ from pathlib import Path
+ import time
+-from sqlalchemy import select
++from sqlalchemy import select, text
+ from ..db import make_engine, transaction, utcnow
+ from ..ingestion.jobs import logical_request, plan_job, stable_hash
+ from ..ingestion.models import CollectionJob, TargetUniverseManifest
+@@ -26,7 +28,8 @@
+               postprocess=None, postprocess_budget_seconds=60,
+               source_handlers=None,source_handler_budget_seconds=120,rate_admission=None,
+               acquisition_deadline=None,phase_callback=None,
+-              task_archive_input_root=None,task_archive_output_root=None,task_archive_input_sequence=None):
++              task_archive_input_root=None,task_archive_output_root=None,task_archive_input_sequence=None,
++              price_as_of=None):
+     slots = validate_ownership(ownership)
+     if not 0 <= budget_seconds <= 14400 or budget_seconds==0 and acquisition_deadline is None:
+         raise ValueError("bounded remote execution window required")
+@@ -39,7 +42,12 @@
+     handler_ceiling=budget_seconds/3 if core_slots else budget_seconds-reserved_post
+     reserved_handlers=min(source_handler_budget_seconds,handler_ceiling) if source_handlers else 0
+     if reserved_post<0 or reserved_handlers<0:raise ValueError('bounded processing reservation required')
+-    deadline = time.monotonic() + budget_seconds; checkpoint = dict(checkpoint or {})
++    started = time.monotonic()
++    deadline = started + budget_seconds
++    checkpoint = dict(checkpoint or {})
++    split_prices = ownership.get('etf_cadence') == 'split_daily_weekly_v1'
++    manage_price_queue = split_prices and task_archive_output_root is not None
++    price_as_of = price_as_of or utcnow()
+     archive_binding=None
+     if task_archive_output_root is not None or 'task_state_archive' in checkpoint:
+         from .task_archive import make_binding,hydrate_checkpoint
+@@ -48,6 +56,18 @@
+             if task_archive_input_root is None or task_archive_input_sequence is None:raise ValueError('authenticated resume task archive root and generation required')
+             incoming_binding=make_binding({**ownership,'provider_slots':slots},stream_id,start_sequence=task_archive_input_sequence)
+             checkpoint=hydrate_checkpoint(checkpoint,task_archive_input_root,binding=incoming_binding)
++    if manage_price_queue and checkpoint.get('extra_daily_queue_cleanup') != 1:
++        from .extra_cadence import clean_legacy_daily_queue
++        counts = Counter()
++        for task in checkpoint.get('task_state', []):
++            lane = task['request'].get('cadence_lane')
++            lane = lane if lane in {'daily_latest','daily_catchup','weekly_correction'} else 'legacy'
++            status = task['status']
++            counts[(task['source'], lane, status, 'attempted' if task.get('attempts') else 'unstarted')] += 1
++        cleanup = clean_legacy_daily_queue(checkpoint, as_of=price_as_of)
++        checkpoint['extra_daily_queue_cleanup'] = 1
++        print(json.dumps({'status':'extra_legacy_queue_migrated','before':{
++            ':'.join(key): count for key,count in sorted(counts.items())}, **cleanup}),flush=True)
+     if 'raw_identity_archive' in checkpoint:
+         if 'raw_identity_index' in checkpoint:raise ValueError('one original raw identity authority required')
+         from .raw_registration import validate_archive_binding
+@@ -84,6 +104,7 @@
+         if scope["output_start"] != "2016-01-01" or scope["output_end"] != "2026-10-07": raise ValueError("original backfill scope must remain intact")
+         before = {name: set(session.scalars(select(list(table.primary_key.columns)[0]))) for name, table in registry.items()}
+         task_jobs = {}
++        latest_ids = set()
+         for spec in planned_jobs:
+             dumps(spec)
+             if ownership.get('version')==2 and (spec['request'].get('output_start','')<ownership['forward_start'] or
+@@ -95,26 +116,53 @@
+             if identity in completed: continue
+             job = plan_job(session, source=spec["source"], domain=spec["domain"], entity_id=spec["entity_id"], request=spec["request"], priority=spec.get("priority",10))
+             task_jobs[identity] = job.id
++            if spec['request'].get('cadence_lane') == 'daily_latest':
++                latest_ids.add(job.id)
+     price_before=[];price_queues={};price_selected={}
+     if ownership.get('etf_cadence')=='split_daily_weekly_v1':
+         from .extra_cadence import history_rotation
+         with transaction(engine) as session:
+-            price_before=snapshot_jobs(list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({'kis','kis_overseas'})))),owned_sources={'kis','kis_overseas'})
++            price_before=snapshot_jobs(list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({'kis','kis_overseas'}),
++                CollectionJob.status.in_({'pending','retry','running'})))),owned_sources={'kis','kis_overseas'})
+         for source in {slot['source'] for slot in core_slots}&{'kis','kis_overseas'}:
+-            price_queues[source],price_selected[source]=history_rotation(price_before,checkpoint.get('price_history_queue',{}).get(source,[]),source=source,as_of=utcnow())
++            price_queues[source],price_selected[source]=history_rotation(price_before,checkpoint.get('price_history_queue',{}).get(source,[]),source=source,as_of=price_as_of)
++    if manage_price_queue:
++        # Fresh leases use the source/date prefix even with hundreds of thousands of old rows.
++        with transaction(engine) as session:
++            session.execute(text("""
++                CREATE INDEX IF NOT EXISTS ix_extra_current_price_jobs
++                ON collection_job (source, (request->>'output_end'), attempts, priority, id)
++                WHERE status IN ('pending','retry','running') AND domain = 'prices'
++                  AND request->>'cadence_lane' IN ('daily_latest','daily_catchup')
++            """))
++            session.execute(text('ANALYZE collection_job'))
++        setup_finished=time.monotonic()
++        deadline=setup_finished+budget_seconds
++        if acquisition_deadline is not None:
++            deadline=min(deadline,acquisition_deadline)
++        print(json.dumps({'status':'extra_price_acquisition_window','setup_seconds':round(setup_finished-started),
++            'remaining_seconds':max(0,round(deadline-setup_finished))}),flush=True)
+     outcomes = []
+     phase('acquisition_started')
+     from ..ingestion.supervisor import run_collection
+-    for position,slot in enumerate(core_slots):
+-        remaining = (deadline - time.monotonic() - reserved_post - reserved_handlers)/(len(core_slots)-position)
+-        if remaining <= 0: break
+-        if ownership.get('etf_cadence')=='split_daily_weekly_v1' and slot['source'] in {'kis','kis_overseas'}:
+-            from .extra_cadence import run_price_budget
+-            outcomes.extend(run_price_budget(run_collection,engine,raw_root,slot,budget_seconds=remaining,
+-                as_of=utcnow(),hard_deadline=deadline-reserved_post-reserved_handlers,history_ids=price_selected[slot['source']]))
+-        else:
+-            outcomes.append(run_collection(engine, raw_root, market=slot["market"], domain=slot["domain"],
+-                                           budget_seconds=remaining, mode="incremental", source_filter=[slot["source"]]))
++    if split_prices and core_slots and all(slot['source'] in {'kis','kis_overseas'} for slot in core_slots):
++        from .extra_cadence import run_price_slots
++        cutoff=deadline-reserved_post-reserved_handlers
++        remaining=cutoff-time.monotonic()
++        if remaining>0:
++            outcomes.extend(run_price_slots(run_collection,engine,raw_root,core_slots,budget_seconds=remaining,
++                as_of=price_as_of,hard_deadline=cutoff,history_ids=price_selected))
++    else:
++        for position,slot in enumerate(core_slots):
++            remaining = (deadline - time.monotonic() - reserved_post - reserved_handlers)/(len(core_slots)-position)
++            if remaining <= 0: break
++            if ownership.get('etf_cadence')=='split_daily_weekly_v1' and slot['source'] in {'kis','kis_overseas'}:
++                from .extra_cadence import run_price_budget
++                outcomes.extend(run_price_budget(run_collection,engine,raw_root,slot,budget_seconds=remaining,
++                    as_of=price_as_of,hard_deadline=deadline-reserved_post-reserved_handlers,history_ids=price_selected[slot['source']]))
++            else:
++                outcomes.append(run_collection(engine, raw_root, market=slot["market"], domain=slot["domain"],
++                                               budget_seconds=remaining, mode="incremental", source_filter=[slot["source"]]))
+     postprocess_state={}
+     if source_handlers and deadline-time.monotonic()>reserved_post:
+         postprocess_state=source_handlers(engine,raw_root,manifest_id=scope['manifest_id'],slots=slots,
+@@ -140,24 +188,47 @@
          # ownership/lease/fencing authority never enter the payload.
          all_owned=list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({s['source'] for s in slots}))))
          portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
 -        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue'}},**postprocess_state,
-+        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue','completed_price_observations'}},**postprocess_state,
++        if manage_price_queue:
++            from .extra_cadence import defer_unstarted_latest,history_progress
++            history=history_progress(checkpoint.get('task_state',[]),portable,as_of=price_as_of)
++            portable,deferred_latest=defer_unstarted_latest(portable,latest_ids)
++            lane_outcomes=[{'source':result['lane_source'],'lane':result['lane'],
++                'processed':result.get('processed_this_run',0),
++                'completed_with_rows':result.get('price_completed_with_rows',0),
++                'blocked':sorted({reason if re.fullmatch(r'[a-zA-Z0-9_]{1,60}',str(reason)) else 'other'
++                    for reason in result.get('blocked_sources',{}).values()})}
++                for result in outcomes if 'lane' in result]
++            print(json.dumps({'status':'extra_price_backlog_progress','historical':history,
++                'deferred_unstarted_latest':deferred_latest,'lanes':lane_outcomes}),flush=True)
++        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue','completed_price_observations','extra_daily_queue_cleanup'}},**postprocess_state,
                                "version": 2, "completed_task_ids": sorted(completed), "task_state":portable,
                                "provider_rate_state":snapshot_rate_state(session,{s['source'] for s in slots},binding=rate_binding),
                                **({'raw_identity_index':snapshot_raw_identities(session)} if 'raw_identity_index' in checkpoint else {}),
-@@ -148,16 +148,27 @@
+-                              "unfinished_task_ids": sorted(j.identity_hash for j in all_owned if j.status not in {'succeeded','superseded'}),
++                              "unfinished_task_ids": sorted(task['identity_hash'] for task in portable if task['status'] not in {'succeeded','superseded'}),
                                "completed_through":refresh_watermarks(all_owned,checkpoint.get('completed_through',{}),owned_sources={s['source'] for s in slots}),
                                "data_export_cursor":{"stream_id":stream_id,"sequence":sequence,"previous_bundle_id":previous_bundle_id},
                                "coverage_complete": False}
@@ -635,7 +957,7 @@
 +                if source in checkpoint.get('completed_through', {}):
 +                    durable_checkpoint['completed_through'][source]=checkpoint['completed_through'][source]
 +            progress=price_progress(manifest_members,durable_checkpoint,sources=price_sources,
-+                forward_start=datetime.fromisoformat(ownership['forward_start']).date(),as_of=utcnow())
++                forward_start=datetime.fromisoformat(ownership['forward_start']).date(),as_of=price_as_of)
 +            retired=retire_completed_daily_jobs(durable_checkpoint,progress)
 +            del durable_checkpoint['unfinished_task_ids']
              durable_checkpoint['price_cadence_progress']={'policy':'extra_split_daily_weekly_v6',
@@ -663,12 +985,143 @@
  
  
  def stable_hash(value) -> str:
-@@ -124,7 +127,7 @@
+@@ -119,12 +122,15 @@
+         if request_lane not in {'latest','history','correction'} or type(request_day) is not date:
+             raise ValueError('explicit bounded price execution lane/day required')
+         lane=CollectionJob.request['cadence_lane'].astext
+-        current=(lane=='daily_latest') & (CollectionJob.request['output_end'].astext==request_day.isoformat())
+-        if request_lane=='latest':statement=statement.where(current)
++        daily_lanes = ('daily_latest', 'daily_catchup')
++        current_day = CollectionJob.request['output_end'].astext == request_day.isoformat()
++        if request_lane=='latest':
++            statement = statement.where(text("collection_job.domain = 'prices'"),
++                text("collection_job.request->>'cadence_lane' IN ('daily_latest','daily_catchup')"), current_day)
          elif request_lane=='correction':statement=statement.where(lane=='weekly_correction')
-         else:statement=statement.where(or_(lane.is_(None),lane!='weekly_correction'),or_(lane.is_(None),lane!='daily_latest',CollectionJob.request['output_end'].astext!=request_day.isoformat()))
+-        else:statement=statement.where(or_(lane.is_(None),lane!='weekly_correction'),or_(lane.is_(None),lane!='daily_latest',CollectionJob.request['output_end'].astext!=request_day.isoformat()))
++        else:statement=statement.where(or_(lane.is_(None),lane!='weekly_correction'),or_(lane.is_(None),lane.not_in(daily_lanes),~current_day))
      if request_ids is not None:
 -        if request_lane!='history' or not isinstance(request_ids,list) or len(request_ids)>128 or len(request_ids)!=len(set(request_ids)):
 +        if request_lane!='history' or not isinstance(request_ids,list) or len(request_ids)>MAX_HISTORY_JOB_IDS or len(request_ids)!=len(set(request_ids)):
              raise ValueError('bounded distinct history selection required')
          statement=statement.where(CollectionJob.id.in_(request_ids))
      ordering = ([CollectionJob.attempts] if fair else []) + [CollectionJob.priority, CollectionJob.id]
+--- a/src/backtest_data/ingestion/supervisor.py
++++ b/src/backtest_data/ingestion/supervisor.py
+@@ -57,7 +57,7 @@
+ 
+ 
+ def run_collection(engine, raw_root, *, market, domain, budget_seconds=None, mode="incremental", source_filter=None,
+-        request_lane=None,request_day=None,request_ids=None):
++        request_lane=None,request_day=None,request_ids=None,prepare_queue=True,execution_deadline=None):
+     if domain not in {"prices", "fundamentals", "indices"}:
+         raise ValueError("Unknown collection domain")
+     if domain == "indices":
+@@ -88,18 +88,21 @@
+     alpaca = AlpacaData(http, credentials)
+     owner, start, outcomes = new_id(), time.monotonic(), deque(maxlen=100)
+     processed = 0
++    price_completed_with_rows = 0
+     domains = ["prices"] if domain == "prices" else ["fundamentals", "issuer_discovery", "filing_sql", "filing_json"]
+     lane_order = [(source, stage) for stage in domains for source in sources]
+     with transaction(engine) as session:
+-        consolidated = consolidate_pending_jobs(session, sources=source_filter)
++        consolidated = consolidate_pending_jobs(session, sources=source_filter) if prepare_queue else 0
+         json_planned = plan_dart_json(session)["created_jobs"] if domain == "fundamentals" and "opendart" in sources else 0
+         repair_count = request_repair(session, domains=domains, market=market, sources=source_filter) if mode == "repair" else 0
+-        attempts = select(CollectionJob.source, CollectionJob.domain, func.sum(CollectionJob.attempts)).where(
+-            CollectionJob.source.in_(sources), CollectionJob.domain.in_(domains), CollectionJob.status != "superseded")
+-        if market != "both":
+-            attempts = attempts.where(CollectionJob.request["market"].astext == market.upper())
+-        durable_attempts = {(row[0], row[1]): row[2] for row in session.execute(
+-            attempts.group_by(CollectionJob.source, CollectionJob.domain))}
++        durable_attempts = {}
++        if len(lane_order) > 1:
++            attempts = select(CollectionJob.source, CollectionJob.domain, func.sum(CollectionJob.attempts)).where(
++                CollectionJob.source.in_(sources), CollectionJob.domain.in_(domains), CollectionJob.status != "superseded")
++            if market != "both":
++                attempts = attempts.where(CollectionJob.request["market"].astext == market.upper())
++            durable_attempts = {(row[0], row[1]): row[2] for row in session.execute(
++                attempts.group_by(CollectionJob.source, CollectionJob.domain))}
+         lanes = deque(sorted(lane_order, key=lambda lane: durable_attempts.get(lane, 0)))
+     setup_elapsed = time.monotonic() - start
+     start = time.monotonic()
+@@ -114,7 +117,8 @@
+             'status':'lease_lost','reason':'lease_lost'})
+         processed+=1
+     try:
+-        while budget_seconds is None or time.monotonic() - start < budget_seconds:
++        while ((budget_seconds is None or time.monotonic() - start < budget_seconds)
++               and (execution_deadline is None or time.monotonic() < execution_deadline)):
+             with transaction(engine) as session:
+                 lease = None
+                 for _ in range(len(lanes)):
+@@ -158,6 +162,8 @@
+                             elif outcome.get("deferred_recent_start"):
+                                 outcome["reason"] = "api_traversal_complete_recent_interval_deferred"
+                             complete_job(session, lease, utcnow(), outcome, status=status)
++                        if status == 'succeeded' and outcome.get('source_row_count', 0) > 0:
++                            price_completed_with_rows += 1
+                         outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
+                         processed += 1
+                         continue
+@@ -203,6 +209,8 @@
+                             elif outcome["source_exhausted"]:
+                                 outcome["reason"] = "source_exhausted_with_observed_history"
+                             complete_job(session, lease, utcnow(), outcome, status=status)
++                        if status == 'succeeded' and outcome.get('source_row_count', 0) > 0:
++                            price_completed_with_rows += 1
+                         outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
+                         processed += 1
+                         continue
+@@ -234,6 +242,8 @@
+                             elif outcome['source_exhausted']:
+                                 outcome['reason'] = 'source_exhausted_with_observed_history'
+                             complete_job(session, lease, utcnow(), outcome, status=status)
++                        if status == 'succeeded' and outcome.get('source_row_count', 0) > 0:
++                            price_completed_with_rows += 1
+                         outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
+                         processed += 1
+                         continue
+@@ -296,7 +306,7 @@
+         http.close()
+     return {"status": "blocked" if not processed and blocked_sources else "partial", "processed_this_run": processed, "elapsed_seconds": round(time.monotonic() - start, 2),
+             "setup_elapsed_seconds": round(setup_elapsed, 2), "budget_semantics": "execution_excludes_queue_planning",
+-            "blocked_sources": blocked_sources, "scheduling_policy": "durable_lane_attempts_round_robin_v2",
++            "blocked_sources": blocked_sources, "price_completed_with_rows": price_completed_with_rows, "scheduling_policy": "durable_lane_attempts_round_robin_v2",
+             "blocked_stages": [{'source':s, 'domain':d, 'reason':reason} for (s,d),reason in sorted(blocked_stages.items())],
+             "structured_dart_jobs_planned": json_planned,
+             "target_scope_preserved": True, "outcomes": list(outcomes), "outcomes_truncated": processed > len(outcomes),
+--- a/src/backtest_data/remote/checkpoint.py
++++ b/src/backtest_data/remote/checkpoint.py
+@@ -1,6 +1,6 @@
+ """Portable owned-job state; authority reset is restricted to ephemeral SQL."""
+ from datetime import date
+-from sqlalchemy import select
++from sqlalchemy import insert, select
+ from ..ingestion.models import CollectionJob
+ from .codec import PaginationCursor, dumps
+ 
+@@ -42,13 +42,20 @@
+     # A live/local queue is never overwritten. Workflow restores into a fresh PG.
+     if session.scalar(select(CollectionJob.id).limit(1)) is not None:raise ValueError('ephemeral task restore requires an empty operational queue')
+     jobs=[]
++    restored=0
+     for portable in state:
+         dumps(portable)
+         if portable['source'] not in owned_sources:raise ValueError('task outside explicitly owned source')
+         values=runtime_task(portable)
+-        jobs.append(CollectionJob(**values,lease_owner=None,lease_until=None,fencing_token=0))
+-    session.add_all(jobs);session.flush()
+-    return len(jobs)
++        jobs.append(dict(values,lease_owner=None,lease_until=None,fencing_token=0))
++        if len(jobs)==2000:
++            session.execute(insert(CollectionJob.__table__),jobs)
++            restored+=len(jobs)
++            jobs.clear()
++    if jobs:
++        session.execute(insert(CollectionJob.__table__),jobs)
++        restored+=len(jobs)
++    return restored
+ 
+ 
+ def refresh_watermarks(jobs, previous, *, owned_sources):
