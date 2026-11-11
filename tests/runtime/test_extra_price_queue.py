@@ -184,3 +184,23 @@ def test_today_catchup_alias_is_served_as_latest(cadence):
                 request_lane='latest', request_day=date(2026, 11, 10))
     assert "request->>'cadence_lane' IN ('daily_latest','daily_catchup')" in session.sql
     assert "'2026-11-10'" in session.sql
+
+
+@pytest.mark.parametrize(('clock', 'ready'), [
+    ('2026-11-11T01:29:59+00:00', '2026-11-09'),
+    ('2026-11-11T01:30:00+00:00', '2026-11-10'),
+    ('2026-11-12T01:30:00+00:00', '2026-11-11'),
+    ('2026-11-16T01:30:00+00:00', '2026-11-13'),
+    ('2026-07-15T01:30:00+00:00', '2026-07-14'),
+])
+def test_extra_us_ready_cutoff_matches_1030_korea(cadence, clock, ready):
+    assert cadence.price_ready_date('kis_overseas', datetime.fromisoformat(clock)).isoformat() == ready
+
+
+def test_early_manual_us_run_retains_older_history(cadence):
+    previous = dict(task('old', '2026-11-06', 'daily_catchup'), source='kis_overseas')
+    latest_ready = dict(task('ready', '2026-11-09', 'daily_latest'), source='kis_overseas')
+    held = dict(task('hold', '2026-11-10', 'daily_latest'), source='kis_overseas')
+    clock = datetime.fromisoformat('2026-11-11T01:29:00+00:00')
+    assert cadence.history_rotation([held, latest_ready, previous], [], source='kis_overseas',
+                                    as_of=clock)[1] == [previous['id']]

@@ -461,7 +461,7 @@
              target='main',control_target=True,title='Encrypted extra-source checkpoint '+str(head['sequence']),
 --- a/src/backtest_data/remote/extra_cadence.py
 +++ b/src/backtest_data/remote/extra_cadence.py
-@@ -1,20 +1,27 @@
+@@ -1,20 +1,39 @@
  """Fresh Extra price/official plans; immutable old requests remain untouched."""
 +from collections import Counter
  from copy import deepcopy
@@ -479,20 +479,34 @@
 +LIVE_STATUSES = {'pending', 'retry', 'running'}
 +
 +
++def price_ready_date(source, as_of):
++    ready = provider_ready_date(source, as_of)
++    if source != 'kis_overseas':
++        return ready
++    local = as_of.astimezone(ZoneInfo('Asia/Seoul'))
++    day = local.date() - timedelta(days=1 if (local.hour, local.minute) >= (10, 30) else 2)
++    while day.weekday() >= 5:
++        day -= timedelta(days=1)
++    return day
++
++
 +def history_rotation(tasks,previous,*,source,as_of,limit=MAX_HISTORY_JOB_IDS):
      """A finite restored rotation lets already-attempted work precede arrivals."""
 -    if not isinstance(previous,list) or len(previous)!=len(set(previous)) or not 1<=limit<=128:
 +    if not isinstance(previous,list) or len(previous)!=len(set(previous)) or not 1<=limit<=MAX_HISTORY_JOB_IDS:
          raise ValueError('bounded distinct price history rotation required')
-     current=provider_ready_date(source,as_of).isoformat()
+-    current=provider_ready_date(source,as_of).isoformat()
++    current=price_ready_date(source,as_of).isoformat()
      retained={task['id']:task for task in tasks if task['source']==source and task['domain']=='prices'
-         and task['status'] in {'pending','retry','running'} and task['request'].get('cadence_lane')!='weekly_correction'
+-        and task['status'] in {'pending','retry','running'} and task['request'].get('cadence_lane')!='weekly_correction'
 -        and not (task['request'].get('cadence_lane')=='daily_latest' and task['request']['output_end']==current)}
++        and task['status'] in LIVE_STATUSES and task['request']['output_end'] <= current
++        and task['request'].get('cadence_lane')!='weekly_correction'
 +        and not (task['request'].get('cadence_lane') in DAILY_LANES and task['request']['output_end']==current)}
      def due(task):
          retry=task.get('checkpoint',{}).get('retry_after')
          if retry is None:return True
-@@ -24,7 +31,8 @@
+@@ -24,7 +43,8 @@
      eligible={identity for identity,task in retained.items() if due(task)}
      queue=[identity for identity in previous if identity in retained]
      if not any(identity in eligible for identity in queue):
@@ -502,7 +516,7 @@
      return queue,[identity for identity in queue if identity in eligible][:limit]
  
  
-@@ -38,23 +46,57 @@
+@@ -38,23 +58,57 @@
      return [('latest',seconds*3/5),('history',seconds/4),('correction',seconds*3/20)]
  
  
@@ -530,7 +544,7 @@
 +            allowance = min(share + (unused_latest[source] if lane == 'history' else 0), deadline - started)
 +            result = collector(engine, raw_root, market=slot['market'], domain=slot['domain'],
 +                budget_seconds=allowance, mode='incremental', source_filter=[source],
-+                request_lane=lane, request_day=provider_ready_date(source, as_of),
++                request_lane=lane, request_day=price_ready_date(source, as_of),
 +                prepare_queue=lane == 'latest', execution_deadline=deadline,
 +                **({'request_ids': history_ids[source]} if lane == 'history' and source in history_ids else {}))
 +            outcomes.append({**result, 'lane': lane, 'lane_source': source})
@@ -570,7 +584,13 @@
          for task in checkpoint.get('task_state',[]):
              if task['source']!=source or task['domain']!='prices' or task['entity_id'] not in expected:continue
              request=task['request'];start=date.fromisoformat(request['output_start']);end=date.fromisoformat(request['output_end'])
-@@ -76,9 +118,10 @@
+@@ -71,14 +125,15 @@
+             for (start,end),entry in groups.items():
+                 if start<=day<=end:found.update(entry[axis])
+             return bool(expected) and found==expected
+-        current=provider_ready_date(source,as_of)
++        current=price_ready_date(source,as_of)
+         cutoff=date.fromisoformat(checkpoint.get('completed_through',{}).get(source,(forward_start-timedelta(days=1)).isoformat()))
          cutoff=max(cutoff,forward_start-timedelta(days=1))
          completed_calendar=as_of.astimezone(ZoneInfo('Asia/Seoul' if source=='kis' else 'America/New_York')).date()-timedelta(days=1)
          if cutoff>completed_calendar:raise ValueError('future source watermark')
@@ -584,7 +604,7 @@
          result[source]={'expected_entities':len(expected),'request_completed_through':cutoff.isoformat(),
              'first_unadmitted_date':missing.isoformat(),'unsupported_entities':len(unsupported),
              'numeric_observed_entities':len(numeric),'valid_empty_entities':len(empty),
-@@ -86,24 +129,191 @@
+@@ -86,24 +141,191 @@
      return result
  
  
@@ -624,7 +644,7 @@
 +            untouched.append(task)
 +        elif task['status'] in LIVE_STATUSES | {'succeeded'}:
 +            represented.add(_daily_identity(task))
-+    current = {source: provider_ready_date(source, as_of) for source in ('kis', 'kis_overseas')}
++    current = {source: price_ready_date(source, as_of) for source in ('kis', 'kis_overseas')}
 +    # Keep the latest lane for today's untouched aliases so it retains priority.
 +    untouched.sort(key=lambda task: task['request']['cadence_lane'] != 'daily_latest')
 +    removed = set()
@@ -656,7 +676,7 @@
 +
 +
 +def history_progress(before, after, *, as_of):
-+    current = {source: provider_ready_date(source, as_of).isoformat() for source in ('kis', 'kis_overseas')}
++    current = {source: price_ready_date(source, as_of).isoformat() for source in ('kis', 'kis_overseas')}
 +    def row_count(task):
 +        evidence = task['checkpoint']
 +        return evidence.get('source_rows_total', evidence.get('source_row_count', 0))
@@ -741,7 +761,7 @@
  def plan_price_cadence(members,issuers,*,manifest_id,original_scope,as_of,sources,checkpoint,forward_start,mappings):
      if set(sources)-{'kis','kis_overseas'}:raise ValueError('explicit Extra price sources required')
      progress=price_progress(members,checkpoint,sources=sources,forward_start=forward_start,as_of=as_of)
-+    current = {source: provider_ready_date(source, as_of) for source in sources}
++    current = {source: price_ready_date(source, as_of) for source in sources}
 +    missing = {source: date.fromisoformat(progress[source]['first_unadmitted_date']) for source in sources}
 +    friday = {source: day - timedelta(days=(day.weekday()-4)%7) for source, day in current.items()}
 +    candidate_days = {source: {current[source].isoformat(), missing[source].isoformat(), friday[source].isoformat()}
@@ -918,13 +938,13 @@
      postprocess_state={}
      if source_handlers and deadline-time.monotonic()>reserved_post:
          postprocess_state=source_handlers(engine,raw_root,manifest_id=scope['manifest_id'],slots=slots,
-@@ -140,24 +188,47 @@
+@@ -140,24 +188,49 @@
          # ownership/lease/fencing authority never enter the payload.
          all_owned=list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({s['source'] for s in slots}))))
          portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
 -        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue'}},**postprocess_state,
 +        if manage_price_queue:
-+            from .extra_cadence import defer_unstarted_latest,history_progress
++            from .extra_cadence import defer_unstarted_latest,history_progress,price_ready_date
 +            history=history_progress(checkpoint.get('task_state',[]),portable,as_of=price_as_of)
 +            portable,deferred_latest=defer_unstarted_latest(portable,latest_ids)
 +            lane_outcomes=[{'source':result['lane_source'],'lane':result['lane'],
@@ -934,7 +954,9 @@
 +                    for reason in result.get('blocked_sources',{}).values()})}
 +                for result in outcomes if 'lane' in result]
 +            print(json.dumps({'status':'extra_price_backlog_progress','historical':history,
-+                'deferred_unstarted_latest':deferred_latest,'lanes':lane_outcomes}),flush=True)
++                'deferred_unstarted_latest':deferred_latest,
++                'latest_ready_dates':{source:price_ready_date(source,price_as_of).isoformat()
++                    for source in ('kis','kis_overseas')},'lanes':lane_outcomes}),flush=True)
 +        durable_checkpoint = {**{k:v for k,v in checkpoint.items() if k in {'daily_publication_progress','daily_publication_status','source_handler_state','source_handler_outcomes','price_cadence_progress','price_history_queue','completed_price_observations','extra_daily_queue_cleanup'}},**postprocess_state,
                                "version": 2, "completed_task_ids": sorted(completed), "task_state":portable,
                                "provider_rate_state":snapshot_rate_state(session,{s['source'] for s in slots},binding=rate_binding),
@@ -985,7 +1007,7 @@
  
  
  def stable_hash(value) -> str:
-@@ -119,12 +122,15 @@
+@@ -119,12 +122,16 @@
          if request_lane not in {'latest','history','correction'} or type(request_day) is not date:
              raise ValueError('explicit bounded price execution lane/day required')
          lane=CollectionJob.request['cadence_lane'].astext
@@ -993,6 +1015,7 @@
 -        if request_lane=='latest':statement=statement.where(current)
 +        daily_lanes = ('daily_latest', 'daily_catchup')
 +        current_day = CollectionJob.request['output_end'].astext == request_day.isoformat()
++        statement = statement.where(CollectionJob.request['output_end'].astext <= request_day.isoformat())
 +        if request_lane=='latest':
 +            statement = statement.where(text("collection_job.domain = 'prices'"),
 +                text("collection_job.request->>'cadence_lane' IN ('daily_latest','daily_catchup')"), current_day)

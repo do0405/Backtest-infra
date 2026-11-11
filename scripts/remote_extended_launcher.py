@@ -12,7 +12,7 @@ import zipfile
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='9b04fe116a4becfcd7961d089f778b20fae6953622c375a99ca16ffcd07c5357'
 CYCLE_SOURCE_SHA256='5b6bfebaad2645285572f3adf2ae7db37da6dee13d0e08fcba6cc06479078096'
-ARCHIVE_PATCH_SHA256='9b03455f5dc0e69580f0a4e84c7a755a5b48d0f9bfeadf52b5883af7745d4841'
+ARCHIVE_PATCH_SHA256='59adfb34e0044e56d2fec000f2d1e652b8b64b7ca09257794c3ad56e2941e69e'
 
 
 def command(arguments,**kwargs):
@@ -29,9 +29,9 @@ def apply_task_archive_overlay(runtime,base_sha256):
     sources={
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
-        runtime/'src/backtest_data/remote/extra_cadence.py':'df1dac1471d485a8ba2cec9063f9ed7c3c60c196081a2fe5c222be24abf7cd0e',
-        runtime/'src/backtest_data/remote/worker.py':'5a64a262e4227e849c50ae82084d33b1d7580de5faa134716446442c4b3cdac5',
-        runtime/'src/backtest_data/ingestion/jobs.py':'deba6ee107163d9c9967d508fd13c6093ec2866154a1408db1bc0b0fe006c9bf',
+        runtime/'src/backtest_data/remote/extra_cadence.py':'524e6ba4c96f4fcb45639cdc7ebc66216aead4a595d7929b5b2db99f2ef25441',
+        runtime/'src/backtest_data/remote/worker.py':'87a505a92055373e28cb060105280e3d42c59633babd97ba17b872a39659e263',
+        runtime/'src/backtest_data/ingestion/jobs.py':'f8ea69e8dc806a8da486cf2625f03065302126e9f4db7f423266ab75209e6ddb',
         runtime/'src/backtest_data/remote/checkpoint.py':'07f7c9f46bd20006dd0d8785c2c3d7695091c60a6885728f641249fb0582686f',
         runtime/'src/backtest_data/ingestion/supervisor.py':'60c173f608d9bf0668d554a1ec40240440dea358eff9042d39a3cc49ba2eece0',
     }
