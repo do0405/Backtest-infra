@@ -158,8 +158,8 @@ def test_new_untouched_latest_jobs_remain_plannable_instead_of_persisting(cadenc
 
 def test_history_reduction_requires_actual_source_rows(cadence):
     old = [task(name, '2026-11-09', 'daily_latest') for name in ('a', 'b', 'c')]
-    old[0]['checkpoint']['source_rows_total'] = 2
-    after = [dict(old[0], status='succeeded', checkpoint={'source_rows_total': 6}),
+    old[0]['checkpoint']['normalized_rows_total'] = 2
+    after = [dict(old[0], status='succeeded', checkpoint={'normalized_rows_total': 6}),
              dict(old[1], status='unsupported'), old[2]]
     assert cadence.history_progress(old, after, as_of=AS_OF) == {
         'starting': 3, 'succeeded_with_rows': 1, 'succeeded_without_rows': 0,
@@ -204,3 +204,54 @@ def test_early_manual_us_run_retains_older_history(cadence):
     clock = datetime.fromisoformat('2026-11-11T01:29:00+00:00')
     assert cadence.history_rotation([held, latest_ready, previous], [], source='kis_overseas',
                                     as_of=clock)[1] == [previous['id']]
+
+
+def test_1030_cutoff_is_enforced_by_us_request_adapter(cadence):
+    from backtest_data.prices.adapters.kis_overseas import KISOverseasDailyRequest
+
+    day = date(2026, 11, 10)
+    with pytest.raises(ValueError):
+        KISOverseasDailyRequest('SPY', day, day, 'AMS',
+                               captured_at=datetime.fromisoformat('2026-11-11T01:29:59+00:00'),
+                               use_seoul_readiness=True)
+    request = KISOverseasDailyRequest('SPY', day, day, 'AMS',
+                                      captured_at=datetime.fromisoformat('2026-11-11T01:30:00+00:00'),
+                                      use_seoul_readiness=True)
+    assert request.params()['BYMD'] == '20261110'
+
+
+def test_coalescing_keeps_exact_security_mapping_and_only_completes_observed_days(cadence):
+    from types import SimpleNamespace
+    from backtest_data.ingestion.jobs import coalesce_price_window, observed_price_requests
+
+    leader = SimpleNamespace(**task('a', '2026-11-10', 'daily_latest'))
+    past = SimpleNamespace(**task('a', '2026-11-09', 'daily_catchup'), attempts=0)
+    absent = SimpleNamespace(**task('a', '2026-11-06', 'daily_catchup'), attempts=0)
+    future = SimpleNamespace(**task('a', '2026-11-11', 'daily_latest'), attempts=0)
+    wrong_mapping = SimpleNamespace(**task('a', '2026-11-05', 'daily_latest'), attempts=0)
+    wrong_mapping.request['symbol'] = 'new-provider-symbol'
+    attempted = SimpleNamespace(**task('a', '2026-11-04', 'daily_catchup'), attempts=2)
+    window = coalesce_price_window(leader, [past, absent, future, wrong_mapping, attempted],
+                                   ready_day=date(2026, 11, 10), lane='latest')
+    assert window[:2] == (date(2026, 11, 6), date(2026, 11, 10))
+    assert window[2] == {past.id: '2026-11-09', absent.id: '2026-11-06'}
+    assert observed_price_requests(window[2], {'2026-11-09', '2026-11-10'}) == [past.id]
+
+
+def test_coalesced_page_does_not_mark_a_missing_latest_bar_as_done(cadence, monkeypatch):
+    from backtest_data.ingestion import supervisor
+
+    finished = []
+    def finish(session, siblings, observed):
+        finished.extend(day for day in siblings.values() if day in observed)
+        return len(finished)
+
+    monkeypatch.setattr(supervisor, 'finish_observed_price_requests', finish)
+    prior = '2026-11-09'
+    latest = '2026-11-10'
+    window = (date.fromisoformat(prior), date.fromisoformat(latest), {'sibling': prior})
+    outcome = {'observed_sessions': [prior], 'rejected': 0,
+               'response_valid': True, 'pagination_valid': True, 'source_row_count': 99}
+    assert supervisor._record_kis_page(None, {'output_end': latest}, {}, outcome, window) == ('unsupported', 0, 1)
+    assert finished == [prior]
+    assert outcome['normalized_rows_total'] == 0
