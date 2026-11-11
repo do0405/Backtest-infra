@@ -461,7 +461,7 @@
              target='main',control_target=True,title='Encrypted extra-source checkpoint '+str(head['sequence']),
 --- a/src/backtest_data/remote/extra_cadence.py
 +++ b/src/backtest_data/remote/extra_cadence.py
-@@ -1,20 +1,39 @@
+@@ -1,20 +1,35 @@
  """Fresh Extra price/official plans; immutable old requests remain untouched."""
 +from collections import Counter
  from copy import deepcopy
@@ -470,6 +470,7 @@
  import time
  from ..collection.cadence import provider_ready_date
 +from ..ingestion.jobs import MAX_HISTORY_JOB_IDS, logical_request, stable_hash
++from ..prices.adapters.kis_overseas import overseas_daily_ready_date
  from ..remote_updates import build_update_jobs
  
  
@@ -480,14 +481,9 @@
 +
 +
 +def price_ready_date(source, as_of):
-+    ready = provider_ready_date(source, as_of)
-+    if source != 'kis_overseas':
-+        return ready
-+    local = as_of.astimezone(ZoneInfo('Asia/Seoul'))
-+    day = local.date() - timedelta(days=1 if (local.hour, local.minute) >= (10, 30) else 2)
-+    while day.weekday() >= 5:
-+        day -= timedelta(days=1)
-+    return day
++    if source == 'kis_overseas':
++        return overseas_daily_ready_date(as_of)
++    return provider_ready_date(source, as_of)
 +
 +
 +def history_rotation(tasks,previous,*,source,as_of,limit=MAX_HISTORY_JOB_IDS):
@@ -506,7 +502,7 @@
      def due(task):
          retry=task.get('checkpoint',{}).get('retry_after')
          if retry is None:return True
-@@ -24,7 +43,8 @@
+@@ -24,13 +39,15 @@
      eligible={identity for identity,task in retained.items() if due(task)}
      queue=[identity for identity in previous if identity in retained]
      if not any(identity in eligible for identity in queue):
@@ -516,7 +512,15 @@
      return queue,[identity for identity in queue if identity in eligible][:limit]
  
  
-@@ -38,23 +58,57 @@
+ def rotate_attempted(queue,before,after):
+     attempted={task['id']:task.get('attempts',0) for task in before}
+-    served={task['id'] for task in after if task.get('attempts',0)>attempted.get(task['id'],0)}
++    served={task['id'] for task in after
++            if task['status'] not in LIVE_STATUSES or task.get('attempts',0)>attempted.get(task['id'],0)}
+     return [identity for identity in queue if identity not in served]
+ 
+ 
+@@ -38,23 +55,57 @@
      return [('latest',seconds*3/5),('history',seconds/4),('correction',seconds*3/20)]
  
  
@@ -584,7 +588,7 @@
          for task in checkpoint.get('task_state',[]):
              if task['source']!=source or task['domain']!='prices' or task['entity_id'] not in expected:continue
              request=task['request'];start=date.fromisoformat(request['output_start']);end=date.fromisoformat(request['output_end'])
-@@ -71,14 +125,15 @@
+@@ -71,14 +122,15 @@
              for (start,end),entry in groups.items():
                  if start<=day<=end:found.update(entry[axis])
              return bool(expected) and found==expected
@@ -604,7 +608,7 @@
          result[source]={'expected_entities':len(expected),'request_completed_through':cutoff.isoformat(),
              'first_unadmitted_date':missing.isoformat(),'unsupported_entities':len(unsupported),
              'numeric_observed_entities':len(numeric),'valid_empty_entities':len(empty),
-@@ -86,24 +141,191 @@
+@@ -86,24 +138,191 @@
      return result
  
  
@@ -679,7 +683,7 @@
 +    current = {source: price_ready_date(source, as_of).isoformat() for source in ('kis', 'kis_overseas')}
 +    def row_count(task):
 +        evidence = task['checkpoint']
-+        return evidence.get('source_rows_total', evidence.get('source_row_count', 0))
++        return evidence.get('normalized_rows_total', 0)
 +
 +    backlog = {task['id']: row_count(task) for task in before if task['status'] in LIVE_STATUSES
 +               and task['source'] in current and task['domain'] == 'prices'
@@ -938,7 +942,7 @@
      postprocess_state={}
      if source_handlers and deadline-time.monotonic()>reserved_post:
          postprocess_state=source_handlers(engine,raw_root,manifest_id=scope['manifest_id'],slots=slots,
-@@ -140,24 +188,49 @@
+@@ -140,24 +188,50 @@
          # ownership/lease/fencing authority never enter the payload.
          all_owned=list(session.scalars(select(CollectionJob).where(CollectionJob.source.in_({s['source'] for s in slots}))))
          portable=snapshot_jobs(all_owned,owned_sources={s['source'] for s in slots})
@@ -950,6 +954,7 @@
 +            lane_outcomes=[{'source':result['lane_source'],'lane':result['lane'],
 +                'processed':result.get('processed_this_run',0),
 +                'completed_with_rows':result.get('price_completed_with_rows',0),
++                'older_coalesced_completions':result.get('price_coalesced_completions',0),
 +                'blocked':sorted({reason if re.fullmatch(r'[a-zA-Z0-9_]{1,60}',str(reason)) else 'other'
 +                    for reason in result.get('blocked_sources',{}).values()})}
 +                for result in outcomes if 'lane' in result]
@@ -997,23 +1002,99 @@
              phase('task_state_archive_write_started')
 --- a/src/backtest_data/ingestion/jobs.py
 +++ b/src/backtest_data/ingestion/jobs.py
-@@ -8,6 +8,9 @@
- 
- from ..db import new_id, utcnow
+@@ -10,6 +10,12 @@
  from .models import CollectionJob, RateBudget
-+
-+
+ 
+ 
 +MAX_HISTORY_JOB_IDS = 2048
- 
- 
++DAILY_PRICE_LANES = ('daily_latest', 'daily_catchup')
++MAX_COALESCED_PRICE_DAYS = 35
++
++
++
  def stable_hash(value) -> str:
-@@ -119,12 +122,16 @@
+     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+ 
+@@ -17,6 +23,73 @@
+ def logical_request(request):
+     # The target manifest binds coverage, while source request semantics bind work.
+     return {key: value for key, value in request.items() if key != "manifest_id"}
++
++
++def _daily_price_route(job):
++    request = job.request
++    lane = request.get('cadence_lane')
++    if (job.source not in {'kis', 'kis_overseas'} or job.domain != 'prices'
++            or lane not in DAILY_PRICE_LANES or request.get('refresh_policy') != f'extra_{lane}_v6'
++            or not request.get('output_end') or request.get('output_start') != request['output_end']):
++        return None
++    fields = logical_request(request)
++    for key in ('output_start', 'output_end', 'cadence_lane', 'refresh_policy'):
++        del fields[key]
++    return job.source, job.domain, job.entity_id, fields
++
++
++def _daily_window_bounds(day, ready_day, lane):
++    span = timedelta(days=MAX_COALESCED_PRICE_DAYS)
++    if lane == 'latest':
++        return day - span, day - timedelta(days=1)
++    return day, min(day + span, ready_day - timedelta(days=1))
++
++
++def coalesce_price_window(job, candidates, *, ready_day, lane):
++    day = date.fromisoformat(job.request['output_end'])
++    start, end = _daily_window_bounds(day, ready_day, lane)
++    route = _daily_price_route(job)
++    siblings = {}
++    for candidate in candidates:
++        if (candidate.id == job.id or candidate.status != 'pending' or candidate.attempts != 0
++                or candidate.checkpoint or route is None or _daily_price_route(candidate) != route):
++            continue
++        candidate_day = date.fromisoformat(candidate.request['output_end'])
++        if start <= candidate_day <= end:
++            siblings[candidate.id] = candidate_day.isoformat()
++    days = [day, *(date.fromisoformat(value) for value in siblings.values())]
++    return min(days), max(days), siblings
++
++
++def load_coalesced_price_window(session, job, *, ready_day, lane):
++    if lane not in {'latest', 'history'} or job.checkpoint or _daily_price_route(job) is None:
++        return None
++    day = date.fromisoformat(job.request['output_end'])
++    start, end = _daily_window_bounds(day, ready_day, lane)
++    output_end = CollectionJob.request['output_end'].astext
++    candidates = session.scalars(select(CollectionJob).where(
++        CollectionJob.source == job.source, CollectionJob.domain == job.domain,
++        CollectionJob.entity_id == job.entity_id, CollectionJob.status == 'pending',
++        CollectionJob.attempts == 0, output_end.between(start.isoformat(), end.isoformat()),
++        CollectionJob.request['cadence_lane'].astext.in_(DAILY_PRICE_LANES)
++    ).order_by(output_end, CollectionJob.id).limit(256))
++    return coalesce_price_window(job, candidates, ready_day=ready_day, lane=lane)
++
++
++def observed_price_requests(siblings, observed_sessions):
++    return [job_id for job_id, day in siblings.items() if day in observed_sessions]
++
++
++def finish_observed_price_requests(session, siblings, observed_sessions):
++    ids = observed_price_requests(siblings, observed_sessions)
++    if not ids:
++        return 0
++    result = session.execute(update(CollectionJob).where(
++        CollectionJob.id.in_(ids), CollectionJob.status == 'pending',
++        CollectionJob.attempts == 0, CollectionJob.checkpoint == {}
++    ).values(status='succeeded', checkpoint={'source_rows_total': 1, 'normalized_rows_total': 1,
++        'response_valid': True, 'pagination_valid': True, 'reason': 'observed_in_coalesced_daily_request'}))
++    return result.rowcount
+ 
+ 
+ def plan_job(session, *, source: str, domain: str, entity_id: str, request: dict, priority: int = 10):
+@@ -119,12 +192,15 @@
          if request_lane not in {'latest','history','correction'} or type(request_day) is not date:
              raise ValueError('explicit bounded price execution lane/day required')
          lane=CollectionJob.request['cadence_lane'].astext
 -        current=(lane=='daily_latest') & (CollectionJob.request['output_end'].astext==request_day.isoformat())
 -        if request_lane=='latest':statement=statement.where(current)
-+        daily_lanes = ('daily_latest', 'daily_catchup')
 +        current_day = CollectionJob.request['output_end'].astext == request_day.isoformat()
 +        statement = statement.where(CollectionJob.request['output_end'].astext <= request_day.isoformat())
 +        if request_lane=='latest':
@@ -1021,7 +1102,7 @@
 +                text("collection_job.request->>'cadence_lane' IN ('daily_latest','daily_catchup')"), current_day)
          elif request_lane=='correction':statement=statement.where(lane=='weekly_correction')
 -        else:statement=statement.where(or_(lane.is_(None),lane!='weekly_correction'),or_(lane.is_(None),lane!='daily_latest',CollectionJob.request['output_end'].astext!=request_day.isoformat()))
-+        else:statement=statement.where(or_(lane.is_(None),lane!='weekly_correction'),or_(lane.is_(None),lane.not_in(daily_lanes),~current_day))
++        else:statement=statement.where(or_(lane.is_(None),lane!='weekly_correction'),or_(lane.is_(None),lane.not_in(DAILY_PRICE_LANES),~current_day))
      if request_ids is not None:
 -        if request_lane!='history' or not isinstance(request_ids,list) or len(request_ids)>128 or len(request_ids)!=len(set(request_ids)):
 +        if request_lane!='history' or not isinstance(request_ids,list) or len(request_ids)>MAX_HISTORY_JOB_IDS or len(request_ids)!=len(set(request_ids)):
@@ -1030,20 +1111,52 @@
      ordering = ([CollectionJob.attempts] if fair else []) + [CollectionJob.priority, CollectionJob.id]
 --- a/src/backtest_data/ingestion/supervisor.py
 +++ b/src/backtest_data/ingestion/supervisor.py
-@@ -57,7 +57,7 @@
+@@ -20,7 +20,7 @@
+ from ..prices.kis_overseas_storage import store_kis_overseas_prices
+ from .http import ProviderHTTP, ProviderError
+ from .jobs import (acquire_job, complete_current_job as complete_job, heartbeat_current_job as heartbeat_job,
+-    consolidate_pending_jobs, request_repair, LeaseLost)
++    consolidate_pending_jobs, finish_observed_price_requests, load_coalesced_price_window, request_repair, LeaseLost)
+ from .models import CollectionJob
  
  
+@@ -56,8 +56,29 @@
+     return allowed, blocked
+ 
+ 
++def _record_kis_page(session, request, checkpoint, outcome, window):
++    observed = set(outcome.pop('observed_sessions'))
++    outcome['normalized_rows_total'] = checkpoint.get('normalized_rows_total', 0) + len(observed)
++    if window is None:
++        return None, len(observed), 0
++    if not outcome['response_valid'] or not outcome['pagination_valid']:
++        outcome['reason'] = 'source_response_or_pagination_gap'
++        return 'unsupported', 0, 0
++
++    # Store the original immutable per-day request outcome. The other days
++    # share the same durable, validated price observations from this response.
++    day = request['output_end']
++    covered = int(day in observed)
++    outcome['source_rows_total'] = outcome['source_row_count'] = outcome['normalized_rows_total'] = covered
++    coalesced = finish_observed_price_requests(session, window[2], observed)
++    if covered:
++        return 'succeeded', covered, coalesced
++    outcome['reason'] = 'source_row_validation_gap' if outcome['rejected'] else 'source_no_data'
++    return 'unsupported', 0, coalesced
++
++
  def run_collection(engine, raw_root, *, market, domain, budget_seconds=None, mode="incremental", source_filter=None,
 -        request_lane=None,request_day=None,request_ids=None):
 +        request_lane=None,request_day=None,request_ids=None,prepare_queue=True,execution_deadline=None):
      if domain not in {"prices", "fundamentals", "indices"}:
          raise ValueError("Unknown collection domain")
      if domain == "indices":
-@@ -88,18 +88,21 @@
+@@ -88,18 +109,22 @@
      alpaca = AlpacaData(http, credentials)
      owner, start, outcomes = new_id(), time.monotonic(), deque(maxlen=100)
      processed = 0
 +    price_completed_with_rows = 0
++    price_coalesced_completions = 0
      domains = ["prices"] if domain == "prices" else ["fundamentals", "issuer_discovery", "filing_sql", "filing_json"]
      lane_order = [(source, stage) for stage in domains for source in sources]
      with transaction(engine) as session:
@@ -1068,7 +1181,7 @@
          lanes = deque(sorted(lane_order, key=lambda lane: durable_attempts.get(lane, 0)))
      setup_elapsed = time.monotonic() - start
      start = time.monotonic()
-@@ -114,7 +117,8 @@
+@@ -114,7 +139,8 @@
              'status':'lease_lost','reason':'lease_lost'})
          processed+=1
      try:
@@ -1078,7 +1191,15 @@
              with transaction(engine) as session:
                  lease = None
                  for _ in range(len(lanes)):
-@@ -158,6 +162,8 @@
+@@ -132,6 +158,7 @@
+                     break
+                 job = session.get(CollectionJob, lease.job_id)
+                 source, job_domain, entity_id, request, checkpoint = job.source, job.domain, job.entity_id, dict(job.request), dict(job.checkpoint)
++                daily_window = load_coalesced_price_window(session, job, ready_day=request_day, lane=request_lane)
+             try:
+                 status, outcome = "succeeded", {}
+                 if job_domain == "prices":
+@@ -158,6 +185,8 @@
                              elif outcome.get("deferred_recent_start"):
                                  outcome["reason"] = "api_traversal_complete_recent_interval_deferred"
                              complete_job(session, lease, utcnow(), outcome, status=status)
@@ -1087,36 +1208,92 @@
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -203,6 +209,8 @@
+@@ -176,8 +205,12 @@
+                             continue
+                         end = date.fromisoformat(checkpoint.get("cursor_end") or request["output_end"])
+                         anchor = datetime.fromisoformat(checkpoint["request_anchor"]) if checkpoint.get("request_anchor") else utcnow()
++                        start_day = date.fromisoformat(request["output_start"])
++                        if daily_window is not None:
++                            start_day, end, _ = daily_window
+                         api_request = KISOverseasDailyRequest(request["provider_symbol"],
+-                            date.fromisoformat(request["output_start"]), end, request["exchange"], captured_at=anchor)
++                            start_day, end, request["exchange"], captured_at=anchor,
++                            use_seoul_readiness=request_lane is not None)
+                         response, payload = kis.overseas_daily_prices(api_request)
+                         with transaction(engine) as session:
+                             heartbeat_job(session, lease, utcnow(), timedelta(minutes=5))
+@@ -187,8 +220,11 @@
+                             outcome["requested_output_end"] = request["output_end"]
+                             outcome["rejected_total"] = checkpoint.get("rejected_total", 0) + outcome["rejected"]
+                             outcome["source_rows_total"] = checkpoint.get("source_rows_total", 0) + outcome["source_row_count"]
++                            resolved, observed, coalesced = _record_kis_page(session, request, checkpoint, outcome, daily_window)
+                             earliest = outcome.get("cursor_earliest_session")
+-                            if not outcome["response_valid"] or not outcome["pagination_valid"]:
++                            if resolved is not None:
++                                status = resolved
++                            elif not outcome["response_valid"] or not outcome["pagination_valid"]:
+                                 status, outcome["reason"] = "unsupported", "source_response_or_pagination_gap"
+                             elif not outcome["traversal_complete"]:
+                                 if not earliest or earliest > end.isoformat():
+@@ -203,6 +239,9 @@
                              elif outcome["source_exhausted"]:
                                  outcome["reason"] = "source_exhausted_with_observed_history"
                              complete_job(session, lease, utcnow(), outcome, status=status)
-+                        if status == 'succeeded' and outcome.get('source_row_count', 0) > 0:
++                        price_coalesced_completions += coalesced
++                        if status == 'succeeded' and observed > 0:
 +                            price_completed_with_rows += 1
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -234,6 +242,8 @@
+@@ -210,16 +249,22 @@
+                         status, outcome = "unsupported", {"reason": "unregistered_price_source"}
+                     else:
+                         end = date.fromisoformat(checkpoint.get("cursor_end") or request["output_end"])
+-                        api_request = KISDailyRequest(request["symbol"], date.fromisoformat(request["output_start"]), end)
++                        start_day = date.fromisoformat(request["output_start"])
++                        if daily_window is not None:
++                            start_day, end, _ = daily_window
++                        api_request = KISDailyRequest(request["symbol"], start_day, end)
+                         response, payload = kis.daily_prices(api_request)
+                         with transaction(engine) as session:
+                             heartbeat_job(session, lease, utcnow(), timedelta(minutes=5))
+                             outcome = {**checkpoint, **store_kis_prices(session, entity_id, api_request, response, payload, raw_root,
+                                 fence=lambda: heartbeat_job(session, lease, utcnow(), timedelta(minutes=5)))}
+-                            earliest = outcome.get("cursor_earliest_session")
+                             outcome["rejected_total"] = checkpoint.get("rejected_total", 0) + outcome["rejected"]
+                             outcome["source_rows_total"] = checkpoint.get("source_rows_total", 0) + outcome["source_row_count"]
+-                            if not outcome['response_valid'] or not outcome['pagination_valid']:
++                            resolved, observed, coalesced = _record_kis_page(session, request, checkpoint, outcome, daily_window)
++                            earliest = outcome.get("cursor_earliest_session")
++                            if resolved is not None:
++                                status = resolved
++                            elif not outcome['response_valid'] or not outcome['pagination_valid']:
+                                 status, outcome['reason'] = 'unsupported', 'source_response_or_pagination_gap'
+                             elif not outcome['traversal_complete']:
+                                 if not earliest or earliest > end.isoformat():
+@@ -234,6 +279,9 @@
                              elif outcome['source_exhausted']:
                                  outcome['reason'] = 'source_exhausted_with_observed_history'
                              complete_job(session, lease, utcnow(), outcome, status=status)
-+                        if status == 'succeeded' and outcome.get('source_row_count', 0) > 0:
++                        price_coalesced_completions += coalesced
++                        if status == 'succeeded' and observed > 0:
 +                            price_completed_with_rows += 1
                          outcomes.append({"job_id": lease.job_id, "source": source, "domain": job_domain, "status": status, **outcome})
                          processed += 1
                          continue
-@@ -296,7 +306,7 @@
+@@ -296,7 +344,8 @@
          http.close()
      return {"status": "blocked" if not processed and blocked_sources else "partial", "processed_this_run": processed, "elapsed_seconds": round(time.monotonic() - start, 2),
              "setup_elapsed_seconds": round(setup_elapsed, 2), "budget_semantics": "execution_excludes_queue_planning",
 -            "blocked_sources": blocked_sources, "scheduling_policy": "durable_lane_attempts_round_robin_v2",
-+            "blocked_sources": blocked_sources, "price_completed_with_rows": price_completed_with_rows, "scheduling_policy": "durable_lane_attempts_round_robin_v2",
++            "blocked_sources": blocked_sources, "price_completed_with_rows": price_completed_with_rows,
++            "price_coalesced_completions": price_coalesced_completions, "scheduling_policy": "durable_lane_attempts_round_robin_v2",
              "blocked_stages": [{'source':s, 'domain':d, 'reason':reason} for (s,d),reason in sorted(blocked_stages.items())],
              "structured_dart_jobs_planned": json_planned,
              "target_scope_preserved": True, "outcomes": list(outcomes), "outcomes_truncated": processed > len(outcomes),
 --- a/src/backtest_data/remote/checkpoint.py
 +++ b/src/backtest_data/remote/checkpoint.py
-@@ -1,6 +1,6 @@
+@@ -1,11 +1,11 @@
  """Portable owned-job state; authority reset is restricted to ephemeral SQL."""
  from datetime import date
 -from sqlalchemy import select
@@ -1124,6 +1301,12 @@
  from ..ingestion.models import CollectionJob
  from .codec import PaginationCursor, dumps
  
+ SAFE_CHECKPOINT = frozenset({'cursor_end','page_size','request_anchor','anchor_asof_date','output_start','output_end',
+-    'report_date','deferred_recent_start','source_rows_total','source_row_count','rejected_total','rejected','inserted',
++    'report_date','deferred_recent_start','source_rows_total','source_row_count','normalized_rows_total','rejected_total','rejected','inserted',
+     'response_valid','pagination_valid','source_format_complete','economic_coverage_verified','reason','retry_after',
+     'last_completed_date','last_completed_page','remaining_start'})
+ STATUSES = {'pending','retry','succeeded','unsupported','failed','superseded'}
 @@ -42,13 +42,20 @@
      # A live/local queue is never overwritten. Workflow restores into a fresh PG.
      if session.scalar(select(CollectionJob.id).limit(1)) is not None:raise ValueError('ephemeral task restore requires an empty operational queue')
@@ -1148,3 +1331,106 @@
  
  
  def refresh_watermarks(jobs, previous, *, owned_sources):
+--- a/src/backtest_data/prices/adapters/kis_overseas.py
++++ b/src/backtest_data/prices/adapters/kis_overseas.py
+@@ -9,7 +9,7 @@
+ 
+ from collections.abc import Mapping
+ from dataclasses import dataclass, field
+-from datetime import date, datetime
++from datetime import date, datetime, timedelta
+ import re
+ from typing import Any
+ from zoneinfo import ZoneInfo
+@@ -25,6 +25,16 @@
+ US_EXCHANGES = frozenset({"NAS", "NYS", "AMS"})
+ SYMBOL_PATTERN = r"[A-Z0-9][A-Z0-9./\-^$]{0,119}"
+ NEW_YORK = ZoneInfo("America/New_York")
++SEOUL = ZoneInfo("Asia/Seoul")
++
++
++def overseas_daily_ready_date(as_of: datetime) -> date:
++    require_aware(as_of, "as_of")
++    local = as_of.astimezone(SEOUL)
++    day = local.date() - timedelta(days=1 if (local.hour, local.minute) >= (10, 30) else 2)
++    while day.weekday() >= 5:
++        day -= timedelta(days=1)
++    return day
+ 
+ 
+ def source_session(value: Any) -> date:
+@@ -48,6 +58,7 @@
+     end: date
+     exchange: str
+     captured_at: datetime = field(default_factory=utcnow)
++    use_seoul_readiness: bool = False
+ 
+     def __post_init__(self) -> None:
+         if not isinstance(self.symbol, str) or not re.fullmatch(SYMBOL_PATTERN, self.symbol):
+@@ -59,10 +70,13 @@
+         if not isinstance(self.captured_at, datetime):
+             raise ValueError("captured_at requires a timezone-aware timestamp")
+         require_aware(self.captured_at, "captured_at")
+-        # Conservatively require a fully ended New York calendar day. A market
+-        # close is not a verified publication/revision deadline for this feed.
+-        if self.end >= self.captured_at.astimezone(NEW_YORK).date():
+-            raise ValueError("KIS daily end must precede the current New York day")
++        if type(self.use_seoul_readiness) is not bool or not self.session_is_ready(self.end, self.captured_at):
++            raise ValueError("KIS daily end is past the readiness cutoff")
++
++    def session_is_ready(self, session: date, as_of: datetime) -> bool:
++        if self.use_seoul_readiness:
++            return session <= overseas_daily_ready_date(as_of)
++        return session < as_of.astimezone(NEW_YORK).date()
+ 
+     @property
+     def effective_end(self) -> date:
+@@ -100,8 +114,8 @@
+     session = source_session(row.get("xymd"))
+     if metadata.available_at != metadata.captured_at:
+         raise ValueError("KIS overseas availability requires capture-only evidence")
+-    if session >= metadata.captured_at.astimezone(NEW_YORK).date():
+-        raise ValueError("KIS overseas daily source session must have fully ended")
++    if not request.session_is_ready(session, metadata.captured_at):
++        raise ValueError("KIS overseas daily source session is past the readiness cutoff")
+     if "zdiv" in row:
+         reported_precision(row["zdiv"])
+     prices = {name: decimal_value(row.get(name)) for name in ("open", "high", "low", "clos")}
+--- a/src/backtest_data/prices/kis_overseas_storage.py
++++ b/src/backtest_data/prices/kis_overseas_storage.py
+@@ -15,7 +15,7 @@
+ from ..ingestion.models import IngestionAttempt, RawObject
+ from ..ingestion.raw_store import RawStore
+ from ..releases.models import SelectionDecision, ValidationIssue
+-from .adapters.kis_overseas import ENDPOINT, NEW_YORK, TR_ID, normalize_kis_overseas_bar, reported_precision, source_session
++from .adapters.kis_overseas import ENDPOINT, TR_ID, normalize_kis_overseas_bar, reported_precision, source_session
+ from .domain import PriceContext, require_aware
+ from .models import PriceObservation
+ from .normalize import ObservationMetadata
+@@ -157,7 +157,7 @@
+             try:
+                 day = source_session(row.get("xymd") if isinstance(row, Mapping) else None)
+                 source_sessions.append(day)
+-                if (day > request.end or day >= captured_at.astimezone(NEW_YORK).date()
++                if (day > request.end or not request.session_is_ready(day, captured_at)
+                         or previous_session is not None and day >= previous_session):
+                     raise ValueError("daily page dates exceed the anchor or do not progress strictly backward")
+                 previous_session = day
+@@ -253,6 +253,7 @@
+     empty_history = response_valid and pagination_valid and not rows
+     flush_price_evidence(session, fence)
+     return {"inserted": inserted, "rejected": rejected, "source_row_count": len(rows),
++        "observed_sessions": [day.isoformat() for day in accepted_sessions],
+         "processed_in_range": in_range, "boundary_excluded_count": boundary_excluded,
+         "boundary_reached": boundary_reached,
+         "earliest_session": min(accepted_sessions).isoformat() if accepted_sessions else None,
+--- a/src/backtest_data/prices/storage.py
++++ b/src/backtest_data/prices/storage.py
+@@ -209,6 +209,7 @@
+     flush_pending()
+     return {"inserted": inserted, "inserted_record_ids": inserted_record_ids, "ingestion_attempt_id": attempt_id,
+             "rejected": rejected, "earliest_session": min(sessions).isoformat() if sessions else None,
++            "observed_sessions": [day.isoformat() for day in sessions],
+             "cursor_earliest_session": min(source_sessions).isoformat() if pagination_valid and source_sessions else None,
+             "source_row_count": len(source_sessions), "normalized_row_coverage_complete": response_valid and pagination_valid and rejected == 0,
+             "response_valid": response_valid, "pagination_valid": pagination_valid,

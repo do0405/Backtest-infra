@@ -12,7 +12,7 @@ import zipfile
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='9b04fe116a4becfcd7961d089f778b20fae6953622c375a99ca16ffcd07c5357'
 CYCLE_SOURCE_SHA256='5b6bfebaad2645285572f3adf2ae7db37da6dee13d0e08fcba6cc06479078096'
-ARCHIVE_PATCH_SHA256='59adfb34e0044e56d2fec000f2d1e652b8b64b7ca09257794c3ad56e2941e69e'
+ARCHIVE_PATCH_SHA256='35b9dc2f59d27227f6499a238878678fff254472442ed8d23ba02b16301e6336'
 
 
 def command(arguments,**kwargs):
@@ -29,11 +29,14 @@ def apply_task_archive_overlay(runtime,base_sha256):
     sources={
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
-        runtime/'src/backtest_data/remote/extra_cadence.py':'524e6ba4c96f4fcb45639cdc7ebc66216aead4a595d7929b5b2db99f2ef25441',
-        runtime/'src/backtest_data/remote/worker.py':'87a505a92055373e28cb060105280e3d42c59633babd97ba17b872a39659e263',
-        runtime/'src/backtest_data/ingestion/jobs.py':'f8ea69e8dc806a8da486cf2625f03065302126e9f4db7f423266ab75209e6ddb',
-        runtime/'src/backtest_data/remote/checkpoint.py':'07f7c9f46bd20006dd0d8785c2c3d7695091c60a6885728f641249fb0582686f',
-        runtime/'src/backtest_data/ingestion/supervisor.py':'60c173f608d9bf0668d554a1ec40240440dea358eff9042d39a3cc49ba2eece0',
+        runtime/'src/backtest_data/remote/extra_cadence.py':'120d8e6f9e62c2dc979154afb92dc0db8d9a5a202c60a3c22476a08e575a48af',
+        runtime/'src/backtest_data/remote/worker.py':'30faf617cafd9db90236f81035c70b61240bec81063fd3e8b05bdde2744f838a',
+        runtime/'src/backtest_data/ingestion/jobs.py':'d7524e40794d9b770026dfb94bddc0b8e0cb38b095363eef22a777a4da0a127a',
+        runtime/'src/backtest_data/prices/storage.py':'a4cd5d85066646bdf7377ba3654193bd738391d8d47a737367754e20f3b9eece',
+        runtime/'src/backtest_data/prices/kis_overseas_storage.py':'daff43d39bb2fc62060f3340f961399ce1f120f4d199e44a32c81a86a7c6c68a',
+        runtime/'src/backtest_data/prices/adapters/kis_overseas.py':'204f3ee621f320d43bda6912849a552145f41d295aa2c58f81b9b8092a0b1dac',
+        runtime/'src/backtest_data/remote/checkpoint.py':'3ac332101c85db1dba0bdbb0a990dbbe36145b309c6ecd57e0c7f825fb4fde57',
+        runtime/'src/backtest_data/ingestion/supervisor.py':'dd9d9c41a0d03a28797d4311e7025036de968cdb129a9f7fe5af04778ebccffb',
     }
     for source in sources:
         canonical=source.read_text(encoding='utf-8')
