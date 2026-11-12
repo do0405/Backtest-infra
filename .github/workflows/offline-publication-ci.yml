@@ -80,6 +80,7 @@ jobs:
               archive.extractall(source)
           apply_task_archive_overlay(source, digest)
           PY
+          python -m pip install cryptography==50.0.2 cffi==2.1.1 pycparser==3.0
           EXTRA_RUNTIME_SOURCE="$RUNNER_TEMP/extra-runtime" python -B -m pytest -q -p no:cacheprovider \
             tests/runtime/test_extra_price_reconcile.py tests/runtime/test_extra_price_queue.py tests/runtime/test_extra_task_archive.py
       - name: Verify interruption, fresh-process recovery and malicious packages
