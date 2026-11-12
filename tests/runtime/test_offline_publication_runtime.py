@@ -121,3 +121,70 @@ def test_runtime_download_error_keeps_http_and_retries_reads(monkeypatch):
         releases.github('gh', ['api', 'repos/a/b/releases'])
     assert caught.value.safe_details() == {'http_status': 502, 'operation': 'runtime_read'}
     assert len(calls) == 4 and 'private text' not in str(caught.value)
+
+
+@pytest.mark.parametrize(('failure_phase', 'expected_result', 'expected_output'), [
+    ('publish', 2, 'publication_state=failed'),
+    ('source_index', 0, 'publication_state=committed\nsource_index=deferred'),
+    ('pending_cleanup', 0, 'publication_state=committed\nsource_index=verified\npending_cleanup=deferred'),
+])
+def test_capture_classifies_failures_against_verified_publication(
+        tmp_path, monkeypatch, failure_phase, expected_result, expected_output):
+    from types import SimpleNamespace
+
+    spec = importlib.util.spec_from_file_location('offline_refresh_status_test', runtime/'scripts/offline_refresh.py')
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    work = tmp_path/'capture'
+    output_path = tmp_path/'workflow-output'
+    raw_catalog = b'{}'
+    monkeypatch.setattr(sys, 'argv', ['offline_refresh.py', '--work', str(work)])
+    monkeypatch.setenv('GITHUB_OUTPUT', str(output_path))
+    monkeypatch.setenv('REPOSITORY', 'a/b')
+    monkeypatch.setenv('GITHUB_RUN_ID', '1')
+    monkeypatch.setenv('OFFLINE_CONFIGURATION', json.dumps({
+        'stream_id': 'core-forward-v1', 'catalog_tag': 'catalog',
+        'catalog_sha256': sha256(raw_catalog).hexdigest(),
+    }))
+    monkeypatch.setattr(script.shutil, 'which', lambda _: 'gh')
+    pending = work/'pending.zip'
+    calls = []
+
+    def fake_github(gh, args, *, output=None):
+        if output is None:
+            return json.dumps({'draft': False, 'assets': [{'name': 'catalog.json', 'id': 5, 'size': 2}]})
+        Path(output).write_bytes(raw_catalog)
+
+    def publish(bundles, state):
+        pending.write_bytes(b'original pending bytes')
+        if failure_phase == 'publish':
+            raise ValueError('publish verification failed')
+        return SimpleNamespace(tag='offline-core-forward-v1-000000101')
+
+    def publish_index(*args):
+        calls.append('source_index')
+        if failure_phase == 'source_index':
+            raise ValueError('index readback failed')
+
+    def acknowledge(*args):
+        calls.append('pending_cleanup')
+        raise ValueError('cleanup verification failed')
+
+    monkeypatch.setattr(script, 'github', fake_github)
+    monkeypatch.setattr(script, 'GitHubCaptureTransport', lambda *a, **kw: SimpleNamespace(
+        load_latest_verified_state=lambda: None, publish=publish, pending_publication=({}, {})))
+    monkeypatch.setattr(script, 'recover', lambda *a, **kw: [])
+    monkeypatch.setattr(script, 'reserve_hosted', lambda *a, **kw: SimpleNamespace(used={}))
+    monkeypatch.setattr(script, 'CaptureHTTP', lambda *a, **kw: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(script, 'load_credentials', lambda **kw: None)
+    monkeypatch.setattr(script, 'NativeClients', lambda *a: object())
+    monkeypatch.setattr(script, 'acquire_tick', lambda *a, **kw: ({'provider_status': {}}, []))
+    monkeypatch.setattr(script, 'build_bundles', lambda _: [])
+    monkeypatch.setattr(script, 'publish_index', publish_index)
+    monkeypatch.setattr(script, 'acknowledge', acknowledge)
+
+    assert script.run() == expected_result
+    assert output_path.read_text().strip() == expected_output
+    assert pending.read_bytes() == b'original pending bytes'
+    if failure_phase != 'pending_cleanup':
+        assert 'pending_cleanup' not in calls

@@ -1,7 +1,7 @@
-"""Record real collection health and recover inactivity-disabled schedules only."""
+"""Record collection health and schedule delays."""
 import argparse
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
@@ -10,10 +10,19 @@ from urllib.parse import quote
 
 from offline_publication import GitHubError, github
 
-WORKFLOWS = ('offline-core-refresh.yml', 'remote-data-update.yml')
+WORKFLOW_FLAGS = {
+    'offline-core-refresh.yml': 'CORE_COLLECTION_ALLOWED',
+    'remote-data-update.yml': 'KRX_COLLECTION_ALLOWED',
+    'remote-extended-refresh.yml': 'EXTRA_COLLECTION_ALLOWED',
+}
+WORKFLOWS = tuple(WORKFLOW_FLAGS)
+SCHEDULE_MAX_AGE = timedelta(hours=4)
+SCHEDULE_ALERTS = {'schedule_missing', 'schedule_stale', 'schedule_unsuccessful'}
+PUBLICATION_STATES = {'committed', 'recovered', 'deferred', 'failed'}
+POSTPUBLICATION_STATES = {'verified', 'deferred'}
 CALLERS = {'.github/workflows/' + name for name in (*WORKFLOWS, 'collection-maintenance.yml')}
 STATES = {'active', 'disabled_inactivity', 'disabled_manually', 'disabled_fork', 'deleted'}
-OUTCOMES = {'success', 'failure', 'cancelled', 'skipped', 'not_run', 'deferred'}
+OUTCOMES = {'success', 'failure', 'cancelled', 'skipped', 'not_run', 'deferred', 'committed_with_warnings'}
 RUN_STATES = {'queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'}
 CONCLUSIONS = {None, 'success', 'failure', 'neutral', 'cancelled', 'skipped', 'timed_out',
                'action_required', 'stale', 'startup_failure'}
@@ -43,28 +52,40 @@ def run_summary(value, repository):
     return {key: value[key] for key in ('id', 'status', 'conclusion', 'created_at')}
 
 
-def inspect_workflow(api, prefix, name, allowed, repository):
+def latest_schedule(api, endpoint, repository, *, completed=False):
+    status = '&status=completed' if completed else ''
+    runs = api(f'{endpoint}/runs?event=schedule{status}&per_page=1')['workflow_runs']
+    if not runs:
+        return None
+    run = runs[0]
+    if run.get('event') != 'schedule' or (completed and run.get('status') != 'completed'):
+        raise ValueError('scheduled_run_event_required')
+    return run_summary(run, repository)
+
+
+def inspect_workflow(api, prefix, name, allowed, repository, now):
     endpoint = prefix + '/actions/workflows/' + name
     observation = {'operator_enabled': allowed, 'state': 'unknown',
-                   'recovered': False, 'latest_observed_schedule': None, 'attention': None}
+                   'latest_observed_schedule': None,
+                   'latest_completed_schedule': None, 'attention': None}
     try:
         workflow = api(endpoint)
         if workflow.get('path') != '.github/workflows/' + name or workflow.get('state') not in STATES:
             raise ValueError('known_workflow_identity_required')
         observation['state'] = workflow['state']
-        if allowed and workflow['state'] == 'disabled_inactivity':
-            api(endpoint + '/enable', method='PUT')
-            verified = api(endpoint)
-            if verified.get('path') != workflow['path'] or verified.get('state') != 'active':
-                observation['attention'] = 'enable_not_verified'
-            else:
-                observation.update(state='active', recovered=True)
-        runs = api(endpoint + '/runs?event=schedule&per_page=1')['workflow_runs']
-        scheduled = next((run for run in runs if run.get('event') == 'schedule'), None)
-        if scheduled:
-            observation['latest_observed_schedule'] = run_summary(scheduled, repository)
-        if allowed and observation['state'] in {'disabled_fork', 'deleted'}:
-            observation['attention'] = 'workflow_unavailable'
+        scheduled = latest_schedule(api, endpoint, repository)
+        completed = scheduled if scheduled and scheduled['status'] == 'completed' else (
+            latest_schedule(api, endpoint, repository, completed=True) if scheduled else None)
+        observation.update(latest_observed_schedule=scheduled, latest_completed_schedule=completed)
+        if allowed and observation['state'] != 'disabled_manually' and observation['attention'] is None:
+            if observation['state'] != 'active':
+                observation['attention'] = 'workflow_unavailable'
+            elif scheduled is None:
+                observation['attention'] = 'schedule_missing'
+            elif now - datetime.fromisoformat(scheduled['created_at'].replace('Z', '+00:00')) > SCHEDULE_MAX_AGE:
+                observation['attention'] = 'schedule_stale'
+            elif completed and completed['conclusion'] != 'success':
+                observation['attention'] = 'schedule_unsuccessful'
     except (GitHubError, ValueError, KeyError, TypeError) as exc:
         observation['attention'] = 'workflow_inspection_failed'
         observation['error_type'] = type(exc).__name__
@@ -122,13 +143,18 @@ def publish_health(api, prefix, branch, health, *, sleep=time.sleep):
     raise GitHubError(409)
 
 
-def maintain(api, *, repository, run_id, run_attempt, collection_outcome, enabled, now):
+def maintain(api, *, repository, run_id, run_attempt, collection_outcome, enabled, now,
+             publication_state=None, source_index=None, pending_cleanup=None):
     if set(enabled) != set(WORKFLOWS) or any(type(value) is not bool for value in enabled.values()):
         raise ValueError('known_workflows_and_operator_flags_required')
     if (not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) or
             type(run_id) is not int or run_id <= 0 or type(run_attempt) is not int or run_attempt <= 0 or
             collection_outcome not in OUTCOMES or now.tzinfo is None):
         raise ValueError('explicit_maintenance_context_required')
+    if (publication_state not in PUBLICATION_STATES | {None}
+            or source_index not in POSTPUBLICATION_STATES | {None}
+            or pending_cleanup not in POSTPUBLICATION_STATES | {None}):
+        raise ValueError('known_publication_states_required')
     prefix = 'repos/' + repository
     repo = api(prefix)
     branch = repo['default_branch']
@@ -144,19 +170,24 @@ def maintain(api, *, repository, run_id, run_attempt, collection_outcome, enable
               'observed_by_run_id': run_id, 'run_attempt': run_attempt, 'event': caller['event'],
               'head_sha': caller['head_sha'], 'collection_outcome': collection_outcome,
               'coverage_complete': False, 'latest_data_release': None,
-              'workflows': {name: inspect_workflow(api, prefix, name, enabled[name], repository)
+              'workflows': {name: inspect_workflow(api, prefix, name, enabled[name], repository, now)
                             for name in WORKFLOWS}}
+    if publication_state is not None:
+        health['core_publication'] = {
+            'state': publication_state, 'source_index': source_index, 'pending_cleanup': pending_cleanup,
+        }
     try:
         health['latest_data_release'] = release_summary(api, prefix +
             '/contents/data/offline/core-forward-v1.json?ref=' + quote(branch, safe=''))
     except (GitHubError, ValueError, KeyError, TypeError) as exc:
         health['source_index_attention'] = type(exc).__name__
-    health['requires_user'] = (any(value['attention'] for value in health['workflows'].values()) or
-                               'source_index_attention' in health)
+    attention = {name: value['attention'] for name, value in health['workflows'].items() if value['attention']}
+    inspection_failed = ('source_index_attention' in health
+                         or any(value not in SCHEDULE_ALERTS for value in attention.values()))
+    health['requires_user'] = bool(attention or inspection_failed or collection_outcome == 'committed_with_warnings')
     committed = publish_health(api, prefix, branch, health)
     return {'status': 'collection_health_committed', 'commit': committed,
-            'recovered_workflows': [name for name in WORKFLOWS if health['workflows'][name]['recovered']],
-            'requires_user': health['requires_user']}
+                'attention': attention, 'requires_user': health['requires_user'], 'inspection_failed': inspection_failed}
 
 
 def main():
@@ -167,11 +198,15 @@ def main():
         repository=os.environ['GITHUB_REPOSITORY'], run_id=int(os.environ['GITHUB_RUN_ID']),
         run_attempt=int(os.environ['GITHUB_RUN_ATTEMPT']),
         collection_outcome=os.environ.get('COLLECTION_OUTCOME', 'not_run'),
-        enabled={WORKFLOWS[0]: os.environ.get('CORE_COLLECTION_ALLOWED') == 'true',
-                 WORKFLOWS[1]: os.environ.get('KRX_COLLECTION_ALLOWED') == 'true'},
-        now=datetime.now(timezone.utc))
+        enabled={name: os.environ.get(flag) == 'true' for name, flag in WORKFLOW_FLAGS.items()},
+        now=datetime.now(timezone.utc),
+        publication_state=os.environ.get('CORE_PUBLICATION_STATE') or None,
+        source_index=os.environ.get('CORE_SOURCE_INDEX') or None,
+        pending_cleanup=os.environ.get('CORE_PENDING_CLEANUP') or None)
     print(json.dumps(result))
-    return 2 if result['requires_user'] else 0
+    for name, reason in result['attention'].items():
+        print(f'::warning::{name}: {reason}')
+    return 2 if result['inspection_failed'] else 0
 
 
 def report_failure(exc):

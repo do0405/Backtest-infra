@@ -298,7 +298,9 @@ def recover(transport, *, on_commit, include_artifacts=False):
             with TemporaryDirectory(prefix='pending-head-', dir=transport.workspace) as directory:
                 state = transport._read_state(head, directory)
         on_commit(head, state)
-        for release, commit, files, _ in verified: acknowledge(transport, release, commit, files)
+        for release, commit, files, _ in verified:
+            if not acknowledge(transport, release, commit, files):
+                output(pending_cleanup='deferred')
     head = transport.last_committed()
     next_tag = f'offline-{transport.stream}-{(head.sequence+1 if head else 1):09d}'
     if any(r.get('tag_name') == next_tag and r.get('draft') for r in transport._inventory()):

@@ -187,10 +187,6 @@ def test_range_audit_preserves_any_trading_day_and_only_exact_aliases(reconcilia
     tasks = [weekend, holiday, trading, conflict, first, alias, other, unknown_route, too_recent]
     cutoff = dict.fromkeys(('kis', 'kis_overseas'), date(2026, 11, 30))
 
-    scope = reconciliation.prior_scope_counts(tasks, ready_dates=cutoff)
-    assert scope['KR']['multi_date_legacy_rolling'] == 4
-    assert scope['US']['multi_date_weekly_correction'] == 3
-    assert scope['US']['unqualified_route'] == scope['US']['not_past_ready_date'] == 1
     stored = {('KR', 'conflict', date(2026, 10, 9), 'KRX', None)}
     assert stored <= reconciliation.candidate_price_keys(tasks, cutoff)
 
@@ -205,7 +201,7 @@ def test_range_audit_preserves_any_trading_day_and_only_exact_aliases(reconcilia
 
 
 def test_mapping_repair_requires_dated_identity_and_rechecks_new_request(reconciliation):
-    from backtest_data.remote.extra_price_mapping import audit_and_repair_us_mappings
+    from backtest_data.remote.extra_price_mapping import repair_us_mappings
 
     def evidence(symbol, stamp='2026-11-05T15:00:00+00:00', exchange='NAS'):
         return {'id': 'evidence-' + symbol + exchange, 'fields': {
@@ -234,7 +230,7 @@ def test_mapping_repair_requires_dated_identity_and_rechecks_new_request(reconci
     checkpoint = {'task_state': rows, 'unfinished_task_ids': [x['identity_hash'] for x in rows],
                   'price_history_queue': {'kis_overseas': [x['id'] for x in rows]}}
 
-    summary = audit_and_repair_us_mappings(checkpoint, archive, ready_dates=ready, apply=True)
+    summary = repair_us_mappings(checkpoint, archive, ready_dates=ready)
 
     assert summary['applied'] == 1
     assert summary['reasons'] == {'verified_catalog_route': 1, 'catalog_capture_after_window_start': 1,
@@ -246,7 +242,7 @@ def test_mapping_repair_requires_dated_identity_and_rechecks_new_request(reconci
     assert replacement['identity_hash'] != rows[0]['identity_hash']
     assert checkpoint['price_history_queue']['kis_overseas'][0] == replacement['id']
     assert replacement['identity_hash'] in checkpoint['unfinished_task_ids']
-    assert audit_and_repair_us_mappings(checkpoint, archive, ready_dates=ready, apply=True)['applied'] == 0
+    assert repair_us_mappings(checkpoint, archive, ready_dates=ready)['applied'] == 0
     result = reconciliation.reconcile_price_queue(checkpoint, ready_dates=ready, stored=set())
     assert result['US']['pending']['removed_weekend'] == 1
     assert replacement['status'] == 'superseded'

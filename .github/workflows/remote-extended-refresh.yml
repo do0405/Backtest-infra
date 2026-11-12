@@ -6,9 +6,6 @@ on:
         description: Bounded extra acquisition with encrypted checkpoint publication margin
         required: false
         default: '4800'
-      audit_previous_sequence:
-        description: Published checkpoint sequence to audit read-only with its successor
-        required: false
   schedule:
     - cron: '37 0-22/2 * * *'
 permissions:
@@ -18,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   refresh:
-    if: vars.REMOTE_EXTENDED_ENABLED == 'true' && vars.REMOTE_EXTENDED_PARTITIONS_READY == 'true' && (github.event_name == 'workflow_dispatch' || vars.REMOTE_EXTENDED_AUTOMATIC_READY == 'true')
+    if: github.ref == 'refs/heads/main' && vars.REMOTE_EXTENDED_ENABLED == 'true' && vars.REMOTE_EXTENDED_PARTITIONS_READY == 'true' && (github.event_name == 'workflow_dispatch' || vars.REMOTE_EXTENDED_AUTOMATIC_READY == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     services:
@@ -34,8 +31,8 @@ jobs:
           --health-cmd "pg_isready -U backtest -d backtest_extra"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       - name: Run exact extra runtime and encrypted private delivery
@@ -58,7 +55,6 @@ jobs:
           FSC_ISSUANCE_SERVICE_KEY: ${{ secrets.FSC_ISSUANCE_SERVICE_KEY }}
           FSC_RIGHTS_SERVICE_KEY: ${{ secrets.FSC_RIGHTS_SERVICE_KEY }}
           BUDGET_SECONDS: ${{ inputs.budget_seconds || '4800' }}
-          EXTRA_AUDIT_PREVIOUS_SEQUENCE: ${{ inputs.audit_previous_sequence || '' }}
         run: |
           umask 077
           python scripts/remote_extended_launcher.py

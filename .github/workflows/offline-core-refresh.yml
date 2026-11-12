@@ -6,24 +6,16 @@ on:
         description: Bounded acquisition time with checkpoint export margin
         default: '5400'
         required: false
-      qualify_sec:
-        description: One bounded original-target SEC API qualification capture
-        type: boolean
-        default: false
-        required: false
   schedule:
     - cron: '13 0-22/2 * * *'
-  workflow_run:
-    workflows: ['Remote data update']
-    types: [completed]
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: offline-core-forward-owner
   cancel-in-progress: false
 jobs:
   refresh:
-    if: vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && github.event.repository.private == false && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
+    if: github.ref == 'refs/heads/main' && vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && github.event.repository.private == false
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -31,11 +23,11 @@ jobs:
       actions: read
     outputs:
       publication_state: ${{ steps.capture.outputs.publication_state }}
+      source_index: ${{ steps.capture.outputs.source_index }}
+      pending_cleanup: ${{ steps.capture.outputs.pending_cleanup }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: main
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       - name: Collect independently and publish durable checkpoint
@@ -51,11 +43,10 @@ jobs:
           OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           BUDGET_SECONDS: ${{ inputs.budget_seconds || '5400' }}
-          QUALIFY_SEC: ${{ inputs.qualify_sec && 'true' || 'false' }}
         run: python scripts/offline_runtime_launcher.py
       - name: Preserve pending delta if publication is deferred or interrupted
-        if: always() && (steps.capture.outcome != 'success' || steps.capture.outputs.publication_state == 'deferred' || steps.capture.outputs.pending_cleanup == 'deferred')
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && (steps.capture.outcome != 'success' || steps.capture.outputs.publication_state == 'deferred' || steps.capture.outputs.source_index == 'deferred' || steps.capture.outputs.pending_cleanup == 'deferred')
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: offline-core-pending-v1-s${{ steps.capture.outputs.pending_sequence }}-h${{ steps.capture.outputs.pending_sha256 }}-r${{ github.run_id }}-a${{ github.run_attempt }}
           path: ${{ runner.temp }}/offline-isolated-runtime/capture/pending.zip
@@ -64,26 +55,16 @@ jobs:
           retention-days: 90
   maintain:
     needs: refresh
-    if: always() && vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && github.event.repository.private == false && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    if: always() && needs.refresh.result != 'skipped'
+    uses: ./.github/workflows/collection-maintenance.yml
     permissions:
       contents: write
-      actions: write
-    concurrency:
-      group: collection-health-owner
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: main
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.13'
-      - name: Preserve repository health even after acquisition failure
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COLLECTION_OUTCOME: ${{ needs.refresh.outputs.publication_state == 'deferred' && 'deferred' || needs.refresh.result }}
-          CORE_COLLECTION_ALLOWED: 'true'
-          KRX_COLLECTION_ALLOWED: ${{ vars.REMOTE_PIPELINE_ENABLED == 'true' && vars.REMOTE_FREE_BUDGET_APPROVED == 'true' && vars.REMOTE_IDENTITY_HANDOFF_READY == 'true' && vars.REMOTE_DATA_PUBLIC_ALLOWED == 'true' && 'true' || 'false' }}
-        run: python scripts/offline_workflow_maintenance.py
+      actions: read
+    with:
+      collection_outcome: ${{
+        (needs.refresh.outputs.source_index == 'deferred' || needs.refresh.outputs.pending_cleanup == 'deferred') && 'committed_with_warnings'
+        || needs.refresh.outputs.publication_state == 'deferred' && 'deferred'
+        || needs.refresh.result }}
+      core_publication_state: ${{ needs.refresh.outputs.publication_state }}
+      core_source_index: ${{ needs.refresh.outputs.source_index }}
+      core_pending_cleanup: ${{ needs.refresh.outputs.pending_cleanup }}

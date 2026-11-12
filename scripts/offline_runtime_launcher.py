@@ -1,26 +1,17 @@
 """Run a hash-pinned isolated collector runtime without altering the KRX code."""
-from hashlib import sha256
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
-import stat
 import subprocess
 import sys
 import time
-import zipfile
 
 
-def runtime_binding(configuration, path):
-    """A reviewed public pin changes only the runtime, preserving private gates."""
-    if not Path(path).exists(): return configuration
-    pin = json.loads(Path(path).read_text(encoding='utf-8'))
-    if (set(pin) != {'format', 'runtime_tag', 'runtime_sha256'} or
-            pin['format'] != 'offline_runtime_pin_v1' or
-            not re.fullmatch(r'offline-core-runtime-v\d+-\d{8}', pin['runtime_tag']) or
-            not re.fullmatch(r'[a-f0-9]{64}', pin['runtime_sha256'])):
-        raise ValueError('complete approved runtime binding required')
-    return {**configuration, 'runtime_tag': pin['runtime_tag'], 'runtime_sha256': pin['runtime_sha256']}
+if __package__:
+    from .collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime
+else:
+    from collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime
 
 
 def github(arguments, output=None):
@@ -45,30 +36,13 @@ def github(arguments, output=None):
         time.sleep(2**(attempt+1))
 
 
-def extract_runtime(archive, runtime, expected_sha256):
-    archive, runtime = Path(archive), Path(runtime)
-    if not 0 < archive.stat().st_size < 64*1024**2 or sha256(archive.read_bytes()).hexdigest()!=expected_sha256:
-        raise ValueError('approved runtime hash mismatch')
-    runtime.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive) as source:
-        entries=source.infolist()
-        if len({member.filename for member in entries})!=len(entries):raise ValueError('unique runtime paths required')
-        expanded=0
-        for member in entries:
-            path=PurePosixPath(member.filename);expanded+=member.file_size
-            if path.is_absolute() or '..' in path.parts or ':' in member.filename or '\\' in member.filename or stat.S_ISLNK(member.external_attr>>16):
-                raise ValueError('unsafe runtime archive path')
-        if expanded>256*1024**2:raise ValueError('runtime expansion bound exceeded')
-        source.extractall(runtime)
-
-
 def main():
-    config=runtime_binding(json.loads(os.environ['OFFLINE_CONFIGURATION']),Path(__file__).with_name('offline-runtime.json'))
+    config = bind_runtime(json.loads(os.environ['OFFLINE_CONFIGURATION']), 'core')
     repo=os.environ['REPOSITORY']
     directory=Path(os.environ['RUNNER_TEMP'])/'offline-isolated-runtime';directory.mkdir()
     release=json.loads(github(['api',f"repos/{repo}/releases/tags/{config['runtime_tag']}"]))
     assets=[row for row in release.get('assets',[]) if row['name']=='runtime.zip']
-    if release.get('draft') or len(assets)!=1 or not 0<assets[0]['size']<64*1024**2:raise ValueError('published bounded runtime required')
+    if release.get('draft') or len(assets)!=1 or not 0<assets[0]['size']<MAX_ARCHIVE_BYTES:raise ValueError('published bounded runtime required')
     archive=directory/'runtime.zip'
     github(['api','-H','Accept: application/octet-stream',f"repos/{repo}/releases/assets/{assets[0]['id']}"],output=archive)
     runtime=directory/'source'

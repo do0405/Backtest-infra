@@ -70,3 +70,70 @@ def test_temporary_maintenance_outage_is_deferred_but_authentication_remains_act
     assert json.loads(capsys.readouterr().out)['status']=='collection_maintenance_deferred'
     assert m.report_failure(m.GitHubError(403,'repository_write'))==2
     assert json.loads(capsys.readouterr().out)['status']=='collection_maintenance_failed'
+
+
+@pytest.mark.parametrize(('enabled', 'latest', 'completed', 'attention'), [
+    (True, None, None, 'schedule_missing'),
+    (True, ('in_progress', None, 5), ('completed', 'failure', 7), 'schedule_stale'),
+    (True, ('in_progress', None, 1), ('completed', 'failure', 2), 'schedule_unsuccessful'),
+    (True, ('in_progress', None, 1), ('completed', 'success', 2), None),
+    (False, ('completed', 'failure', 12), None, None),
+])
+def test_extra_schedule_detects_missing_stale_and_failed_runs(monkeypatch, enabled, latest, completed, attention):
+    from datetime import timedelta
+
+    m = module(monkeypatch)
+    name = 'remote-extended-refresh.yml'
+    assert name in m.WORKFLOW_FLAGS
+    now = datetime(2026, 11, 12, 10, tzinfo=timezone.utc)
+
+    def rows(record):
+        if not record:
+            return []
+        status, conclusion, hours = record
+        return [{'id': hours, 'status': status, 'conclusion': conclusion, 'event': 'schedule',
+                 'created_at': (now - timedelta(hours=hours)).isoformat(),
+                 'repository': {'full_name': 'a/b'}}]
+
+    def api(endpoint):
+        if endpoint.endswith(name):
+            return {'path': '.github/workflows/'+name, 'state': 'active'}
+        record = completed if '&status=completed' in endpoint else latest
+        return {'workflow_runs': rows(record)}
+
+    value = m.inspect_workflow(api, 'repos/a/b', name, enabled, 'a/b', now)
+    assert value['attention'] == attention
+    if completed:
+        assert value['latest_completed_schedule']['conclusion'] == completed[1]
+
+
+
+def test_manually_disabled_schedule_is_never_reenabled_or_reported_stale(monkeypatch):
+    m = module(monkeypatch)
+    name = 'remote-extended-refresh.yml'
+
+    def api(endpoint):
+        if endpoint.endswith(name):
+            return {'path': '.github/workflows/'+name, 'state': 'disabled_manually'}
+        return {'workflow_runs': []}
+
+    now = datetime(2026, 11, 12, 10, tzinfo=timezone.utc)
+    result = m.inspect_workflow(api, 'repos/a/b', name, True, 'a/b', now)
+    assert result['state'] == 'disabled_manually'
+    assert result['attention'] is None
+
+
+
+def test_inactivity_is_reported_without_changing_workflow_settings(monkeypatch):
+    m = module(monkeypatch)
+    name = 'offline-core-refresh.yml'
+
+    def api(endpoint):
+        if endpoint.endswith(name):
+            return {'path': '.github/workflows/'+name, 'state': 'disabled_inactivity'}
+        assert '/runs?' in endpoint
+        return {'workflow_runs': []}
+
+    now = datetime(2026, 11, 12, 10, tzinfo=timezone.utc)
+    value = m.inspect_workflow(api, 'repos/a/b', name, True, 'a/b', now)
+    assert value['attention'] == 'workflow_unavailable'

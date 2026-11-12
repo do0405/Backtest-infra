@@ -387,12 +387,7 @@
 +        pending.rename(destination)
 --- a/scripts/remote_extended_cycle.py
 +++ b/scripts/remote_extended_cycle.py
-@@ -1,21 +1,33 @@
- """Dedicated fresh-runner extra collection with encrypted state and deltas."""
- import argparse
-+from datetime import datetime
- from functools import partial
- import json
+@@ -5,17 +5,28 @@
  import os
  from pathlib import Path
  import shutil
@@ -415,15 +410,15 @@
 +from backtest_data.remote.extended_sync import bundle_receipts,read_encrypted_commit
 +from backtest_data.remote.extra_cadence import price_ready_date
 +from backtest_data.remote.extra_price_mapping import (
-+    audit_and_repair_us_mappings, current_master_symbols, read_mapping_catalog,
++    repair_us_mappings, read_mapping_catalog,
 +)
 +from backtest_data.remote.extra_price_reconcile import (
-+    candidate_price_keys, expanded_scope_counts, prior_scope_counts, reconcile_price_queue, stored_price_keys,
++    candidate_price_keys, expanded_scope_counts, reconcile_price_queue, stored_price_keys,
 +)
  from backtest_data.remote.extra_quotas import PARTITIONS,reserve_allowance,quota_ready
  from backtest_data.remote.folder import FolderTransport
  from backtest_data.remote.planner import validate_ownership
-@@ -28,7 +40,9 @@
+@@ -28,7 +39,9 @@
  from backtest_data.remote.identity import validate_raw_identity_index
  from backtest_data.remote.resume import LazyWindowResolver,window_snapshot,compact_windows
  from backtest_data.remote.paced_publication import publish_release
@@ -434,7 +429,7 @@
  
  
  def publication_summary(head,tag,state):
-@@ -45,9 +59,98 @@
+@@ -45,9 +58,58 @@
          'source_handler_status_counts':counts,'coverage_complete':False}
  
  
@@ -485,69 +480,24 @@
 +    return hydrate_checkpoint(checkpoint, root, binding=incoming_binding), (ref, index)
 +
 +
-+def audit_previous_scope(gh, repo, releases, configuration, sequence, work, *, key, catalog, current):
-+    stream, bootstrap = configuration['owner_id'], configuration['bootstrap']['sha256']
-+    prefix = release_tag(stream, sequence)
-+    position = next((i for i, release in enumerate(releases[:-1])
-+                     if release['tag_name'] == prefix or release['tag_name'].startswith(prefix + '-r')), None)
-+    if position is None:
-+        raise ValueError('published historical checkpoint with successor required')
-+    release, successor = releases[position:position+2]
-+    with TemporaryDirectory(prefix='prior-scope-', dir=work) as temp:
-+        root = Path(temp)
-+        path = download_asset(gh, repo, release, 'commit.json', root/'prior', max_bytes=1024**2)
-+        prior = read_encrypted_commit(path, stream=stream, bootstrap_hash=bootstrap, tag=release['tag_name'])
-+        linked = download_asset(gh, repo, successor, 'commit.json', root/'successor', max_bytes=1024**2)
-+        following = read_encrypted_commit(linked, stream=stream, bootstrap_hash=bootstrap, tag=successor['tag_name'])
-+        if (following['start_sequence'], following['previous_tag'], following['previous_commit_sha256'],
-+                following['previous_bundle_id']) != (sequence + 1, release['tag_name'], digest(path), prior['head']['bundle_id']):
-+            raise ValueError('historical audit requires exact predecessor lineage')
-+        asset = download_asset(gh, repo, release, 'state.json.gz.enc', root/'prior',
-+                               max_bytes=MAX_PRIVATE_ASSET+HEADER.size+16)
-+        clear = decrypt_file(asset, root/'state.json.gz', key=key,
-+                             binding=f"{stream}:{prior['start_sequence']}:state.json.gz",
-+                             record=prior['files']['state.json.gz.enc'])
-+        checkpoint = read_state(clear)
-+        if (checkpoint.get('task_archive_assets') is None or checkpoint.get('handoff_id') != configuration['handoff_id']
-+                or checkpoint.get('forward_start') != configuration['forward_start']):
-+            raise ValueError('historical audit requires owned external task archive')
-+        checkpoint, _ = restore_task_state(gh, repo, releases, configuration, prior, checkpoint, root, key=key)
-+        as_of = datetime.fromisoformat(following['created_at'])
-+        ready_dates = {source: price_ready_date(source, as_of) for source in ('kis', 'kis_overseas')}
-+        return {'status': 'extra_price_prior_scope_audited', 'sequence': sequence, 'tag': release['tag_name'],
-+                'successor_tag': successor['tag_name'],
-+                'ready_dates': {source: day.isoformat() for source, day in ready_dates.items()},
-+                'by_market': prior_scope_counts(checkpoint['task_state'], ready_dates=ready_dates),
-+                'expanded_by_market': expanded_scope_counts(checkpoint['task_state'], ready_dates=ready_dates),
-+                'unqualified_us_mapping': audit_and_repair_us_mappings(
-+                    checkpoint, catalog, ready_dates=ready_dates, current=current),
-+                'official_current_master_status': current[1]}
-+
-+
  def main(argv=None):
 +    acquisition_deadline=time.monotonic()+100*60
      parser=argparse.ArgumentParser();parser.add_argument('--work',required=True,type=Path)
 -    parser.add_argument('--budget-seconds',type=int,default=4800);args=parser.parse_args(argv)
 +    parser.add_argument('--budget-seconds',type=int,default=4800)
-+    parser.add_argument('--audit-previous-sequence',type=int)
 +    args=parser.parse_args(argv)
      if not 30<=args.budget_seconds<=4800:raise ValueError('bounded extra-source batch required')
      configuration=json.loads(os.environ['REMOTE_EXTENDED_OWNERSHIP']);validate_ownership(configuration)
      if configuration.get('version')!=2 or configuration['owner_id']!='extra-forward-v1':raise ValueError('explicit extra forward ownership required')
-@@ -64,6 +167,12 @@
+@@ -64,6 +126,7 @@
      if digest(work/'bootstrap-download/catalog.zip.enc')!=binding['sha256']:raise ValueError('exact bootstrap digest required')
      restore(work/'catalog.zip',work/'catalog',2*1024**3)
      checkpoint=read_state(work/'initial-state.json.gz');releases=inventory(gh,repo,stream)
 +    catalog = read_mapping_catalog(FolderTransport(work/'catalog').committed_bundles(), configuration['manifest_id'])
-+    if args.audit_previous_sequence is not None:
-+        current = current_master_symbols()
-+        print(json.dumps(audit_previous_scope(
-+            gh, repo, releases, configuration, args.audit_previous_sequence, work, key=key,
-+            catalog=catalog, current=current)), flush=True)
      previous=None;prior_hash=None;prior_tag=None;sequence=1;prior=None
      if releases:
          release=releases[-1];path=download_asset(gh,repo,release,'commit.json',work/'previous',max_bytes=1024**2)
-@@ -74,14 +183,17 @@
+@@ -74,14 +137,17 @@
          checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
          previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
      task_binding=make_binding(configuration,stream,start_sequence=sequence)
@@ -569,7 +519,7 @@
      readiness=configuration.get('quota_partition_ready',{})
      allowance=None;fsc_allowance=None
      if readiness.get('alpha_vantage') is True and quota_ready(configuration,'alpha_vantage',utcnow()):
-@@ -127,13 +239,32 @@
+@@ -127,13 +193,32 @@
          checkpoint['raw_identity_archive']=archive.checkpoint_state()
          resolver=LazyWindowResolver(engine,gh=gh,repo=repo,stream=stream,bootstrap_hash=binding['sha256'],key=key,
              work=work/'lazy-resume',raw_root=raw)
@@ -577,7 +527,7 @@
 +        if prior is not None and configuration.get('etf_cadence') == 'split_daily_weekly_v1':
 +            ready_dates = {source: price_ready_date(source,cycle_as_of) for source in ('kis','kis_overseas')}
 +            initial_scope = expanded_scope_counts(checkpoint['task_state'], ready_dates=ready_dates)
-+            mapping_result = audit_and_repair_us_mappings(checkpoint, catalog, ready_dates=ready_dates, apply=True)
++            mapping_result = repair_us_mappings(checkpoint, catalog, ready_dates=ready_dates)
 +            print(json.dumps({'status':'extra_us_price_mapping_audited', 'previous_sequence':prior['end_sequence'],
 +                'before_by_market':initial_scope, 'mapping':mapping_result}), flush=True)
 +            candidates = candidate_price_keys(checkpoint.get('task_state', []),ready_dates)
@@ -604,7 +554,7 @@
          head=result['head'];state=unpack(read_manifest(store/'bundles'/head['bundle_id'])['checkpoint'])
          state.update(handoff_id=configuration['handoff_id'],forward_start=configuration['forward_start'])
          tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
-@@ -143,8 +274,14 @@
+@@ -143,8 +228,14 @@
              scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
              resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
              state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
@@ -620,7 +570,7 @@
          # Initial bootstrap did not occupy the state path; all files use fresh
          # names in this generation even when a predecessor was restored.
          zip_store(resumed,work/'next-resume.zip')
-@@ -164,7 +301,7 @@
+@@ -164,7 +255,7 @@
              'created_at':utcnow().isoformat(),'coverage_complete':False}
          commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
          read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
@@ -1671,7 +1621,7 @@
              "response_valid": response_valid, "pagination_valid": pagination_valid,
 --- /dev/null
 +++ b/src/backtest_data/remote/extra_price_reconcile.py
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,279 @@
 +"""Conservative reconciliation for owned KIS price requests."""
 +
 +from collections import Counter, defaultdict
@@ -1747,39 +1697,6 @@
 +        return True
 +    return (allow_correction and lane == 'weekly_correction' and policy == 'extra_weekly_correction_v6'
 +            and request.get('correction_anchor') == request.get('output_end'))
-+
-+
-+def prior_scope_counts(tasks, *, ready_dates):
-+    """Explain the previous single-session filter, assigning one reason per task."""
-+    counts = {market: Counter() for market in MARKET_BY_SOURCE.values()}
-+    for task in tasks:
-+        source = task['source']
-+        if source not in MARKET_BY_SOURCE or task['status'] not in UNFINISHED:
-+            continue
-+        market, request = MARKET_BY_SOURCE[source], task['request']
-+        dates = _dates(request)
-+        if task['domain'] != 'prices' or request.get('market') != market:
-+            reason = 'market_or_domain'
-+        elif dates is None:
-+            reason = 'invalid_dates'
-+        elif request.get('output_start') != request.get('output_end'):
-+            policy = request.get('refresh_policy')
-+            if policy == 'extra_weekly_correction_v6':
-+                reason = 'multi_date_weekly_correction'
-+            elif policy == LEGACY_POLICY:
-+                reason = 'multi_date_legacy_rolling'
-+            else:
-+                reason = 'multi_date_other'
-+        elif not _window_policy(request, allow_correction=False):
-+            reason = 'unrecognized_policy'
-+        elif _provider_route(task) is None:
-+            reason = 'unqualified_route'
-+        elif dates[1] >= ready_dates[source]:
-+            reason = 'not_past_ready_date'
-+        else:
-+            reason = 'eligible'
-+        counts[market][reason] += 1
-+    return counts
 +
 +
 +def _window(task, ready_dates):
@@ -1986,17 +1903,13 @@
 +    return stats
 --- /dev/null
 +++ b/src/backtest_data/remote/extra_price_mapping.py
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,161 @@
 +"""Audit missing KIS US routes and replace requests only from bound catalog evidence."""
 +
 +from collections import Counter, defaultdict
-+from concurrent.futures import ThreadPoolExecutor
 +from datetime import datetime
-+from urllib.request import urlopen
 +from zoneinfo import ZoneInfo
 +
-+from ..catalog.kis_overseas import MASTER_DIRECTORIES, MAX_MASTER_BYTES, parse_kis_overseas_master
-+from ..catalog.provider_symbols import directory_cqs_symbol
 +from ..db import new_id
 +from ..ingestion.jobs import logical_request, stable_hash
 +from ..remote_updates import restored_mapping
@@ -2022,45 +1935,6 @@
 +    if members is None:
 +        raise ValueError('owned US target manifest required for mapping audit')
 +    return {'members': members, 'observations': observations}
-+
-+
-+def current_master_symbols():
-+    """Read the official directories for diagnostics; these observations do not backdate routes."""
-+    def read(directory):
-+        exchange, url = directory
-+        try:
-+            with urlopen(url, timeout=15) as response:
-+                content = response.read(MAX_MASTER_BYTES + 1)
-+            return exchange, parse_kis_overseas_master(content, exchange)
-+        except (OSError, ValueError):
-+            return exchange, None
-+
-+    symbols = defaultdict(set)
-+    status = {}
-+    with ThreadPoolExecutor(max_workers=len(MASTER_DIRECTORIES)) as pool:
-+        for exchange, rows in pool.map(read, MASTER_DIRECTORIES):
-+            status[exchange] = 'verified' if rows else 'unavailable'
-+            for row in rows or ():
-+                symbols[row.provider_symbol].add(exchange)
-+    return symbols, status
-+
-+
-+def _current_master_reason(member, current):
-+    symbols, status = current
-+    if not status or any(state != 'verified' for state in status.values()):
-+        return 'current_master_incomplete'
-+    if member is None:
-+        return 'target_identity_unavailable'
-+    symbol = member['symbol']
-+    if matches := symbols.get(symbol):
-+        return 'unique_current_exact_match' if len(matches) == 1 else 'ambiguous_current_exact_match'
-+    try:
-+        alias = directory_cqs_symbol(member)
-+    except ValueError:
-+        alias = symbol
-+    if alias != symbol and (matches := symbols.get(alias)):
-+        return 'unique_current_official_cqs_match' if len(matches) == 1 else 'ambiguous_current_official_cqs_match'
-+    return 'no_current_exact_or_official_cqs_match'
 +
 +
 +def _proofs(member, rows):
@@ -2130,12 +2004,12 @@
 +            and checkpoint.get('response_valid') is True and checkpoint.get('pagination_valid') is True))
 +
 +
-+def audit_and_repair_us_mappings(checkpoint, catalog, *, ready_dates, apply=False, current=None):
++def repair_us_mappings(checkpoint, catalog, *, ready_dates):
 +    """Retain original request IDs and evidence, adding only a separately bound replacement."""
 +    tasks = checkpoint['task_state']
 +    members, observations = catalog['members'], catalog['observations']
 +    symbol_counts = Counter(member['symbol'] for member in members.values())
-+    reasons, current_reasons, securities, current_securities = Counter(), Counter(), defaultdict(set), defaultdict(set)
++    reasons, securities = Counter(), defaultdict(set)
 +    pending_repairs = []
 +    for task in tasks:
 +        if (task['source'] != 'kis_overseas' or task['domain'] != 'prices'
@@ -2146,11 +2020,7 @@
 +        reason, proof = _decision(task, member, symbol_counts, observations, ready_dates)
 +        reasons[reason] += 1
 +        securities[reason].add(task['entity_id'])
-+        if current is not None:
-+            current_reason = _current_master_reason(member, current)
-+            current_reasons[current_reason] += 1
-+            current_securities[current_reason].add(task['entity_id'])
-+        if proof and apply:
++        if proof:
 +            pending_repairs.append((task, proof))
 +
 +    applied, reused, held_existing = 0, 0, 0
@@ -2194,6 +2064,4 @@
 +                for source, queue in checkpoint['price_history_queue'].items()
 +            }
 +    return {'reasons': reasons, 'securities_by_reason': {reason: len(ids) for reason, ids in securities.items()},
-+            'current_master_match': current_reasons,
-+            'current_master_securities': {reason: len(ids) for reason, ids in current_securities.items()},
 +            'applied': applied, 'reused_mapped_request': reused, 'held_existing_mapped_request': held_existing}
