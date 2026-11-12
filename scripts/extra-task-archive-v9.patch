@@ -2205,17 +2205,21 @@
 +            'applied': applied, 'reused_mapped_request': reused, 'held_existing_mapped_request': held_existing}
 --- /dev/null
 +++ b/scripts/extra_us_coverage_audit.py
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,351 @@
 +"""Read-only aggregate comparison of the frozen Extra cohort and public source evidence."""
 +
 +from collections import Counter, defaultdict
-+from datetime import date, datetime
++from concurrent.futures import ThreadPoolExecutor
++from datetime import date, datetime, timedelta
 +from gzip import decompress
 +from hashlib import sha256
++from html import unescape
 +import io
 +import json
 +from math import isfinite
 +import os
++import re
++from urllib.parse import urlencode
 +from urllib.request import urlopen
 +from zipfile import BadZipFile, ZipFile
 +from zoneinfo import ZoneInfo
@@ -2299,6 +2303,60 @@
 +        else:
 +            result[identity] = 'listed_official_code_alias'
 +    return result
++
++
++
++def nasdaq_status_history(members, classes):
++    # Request one public date range, without any symbols from the queue.
++    start, end = date(2026, 10, 1), date(2026, 11, 12)
++    base = 'https://nasdaqtrader.com/Trader.aspx?'
++    query = {'id':'nasdaq-security-status-updates', 'from':start.strftime('%m/%d/%Y'),
++             'to':end.strftime('%m/%d/%Y')}
++    def page(number):
++        return read(base + urlencode({**query, 'page':number}), 1024**2).decode()
++    def rows(content):
++        return [fields for item in re.findall(r'<tr\b[^>]*>(.*?)</tr>', content, re.I|re.S)
++                if len(fields := [unescape(re.sub(r'<[^>]+>', '', v)).strip()
++                    for v in re.findall(r'<td\b[^>]*>(.*?)</td>', item, re.I|re.S)]) == 7
++                and re.fullmatch(r'\d{4}-\d\d-\d\d', fields[0])]
++    def name_key(value):
++        return ' '.join(re.findall(r'[^\W_]+', value.casefold()))
++    try:
++        first = page(1)
++        pages = max([1, *[int(p) for p in re.findall(r'&page=(\d+)"', unescape(first))]])
++        if not 1 < pages <= 24:
++            raise ValueError('status history page bound')
++        with ThreadPoolExecutor(max_workers=4) as executor:
++            records = [rows(first), *executor.map(lambda n: rows(page(n)), range(2, pages+1))]
++        if (any(not group for group in records)
++                or len({tuple(tuple(row) for row in group) for group in records}) != len(records)):
++            raise ValueError('incomplete status history')
++        records = [row for group in records for row in group]
++        if records[0][0] != start.isoformat() or records[-1][0] != end.isoformat():
++            raise ValueError('status history did not span requested range')
++    except (OSError, ValueError):
++        return {}, {'history_complete':False}
++    changes = defaultdict(set)
++    for timestamp, symbol, name, action, *_ in records:
++        if action in {'Issue Deletions', 'Issue Suspensions', 'Name/Symbol Changes'}:
++            changes[symbol, name_key(name)].add((timestamp, action))
++    results, ambiguity = {}, 0
++    for identity, member in members.items():
++        if not classes[identity].startswith(('no_current_', 'listing_identity_')) or member['venue'] != 'NASDAQ':
++            continue
++        matches = changes.get((member['symbol'], name_key(member['name'])), set())
++        deletions = sorted(t for t, a in matches if a == 'Issue Deletions')
++        suspensions = sorted(t for t, a in matches if a == 'Issue Suspensions')
++        if len(deletions) == 1:
++            results[identity] = ('official_issue_deletion', date.fromisoformat(deletions[0]))
++        elif len(suspensions) == 1 and not deletions:
++            results[identity] = ('official_issue_suspension', date.fromisoformat(suspensions[0]))
++        elif matches:
++            ambiguity += 1
++    return results, {'history_complete':True,'history_records':len(records),
++                     'history_pages':pages,'history_matches':dict(Counter(v[0] for v in results.values())),
++                     'unresolved_with_name_or_other_status':ambiguity,'history_start':start.isoformat(),
++                     'history_end':end.isoformat()}
 +
 +
 +def _verify_bars(payload, symbol, low, high):
@@ -2486,6 +2544,15 @@
 +    print(json.dumps({'status':'us_coverage_listing_audit', 'listing_counts':Counter(classes.values()),
 +                      'listed_without_kis_by_exchange':exchanges,
 +                      'official_notice_refs':sorted({event[3] for event in events.values()})}), flush=True)
++    history, meta = nasdaq_status_history(members, classes)
++    counts = Counter(kind for kind in classes.values())
++    for identity, (kind, effective) in history.items():
++        counts[classes[identity]] -= 1
++        classes[identity] = kind
++        counts[kind] += 1
++    print(json.dumps({'status':'us_coverage_lifecycle_history','updated_counts':dict(+counts),**meta}),flush=True)
++    for identity, (kind, effective) in history.items():
++        events[identity] = (members[identity]['name'], kind, effective-timedelta(days=1), 'nasdaq-security-status-updates')
 +    verified_listing = {identity for identity, reason in classes.items()
 +                        if reason.startswith(('listed_', 'official_'))}
 +    coverage = existing_alpaca_coverage(configuration['manifest_id'], members, windows, verified_listing, events)
