@@ -214,12 +214,17 @@ def test_recovery_precedes_provider_credentials_and_credit_reservation(tmp_path,
     fake = SimpleNamespace(load_latest_verified_state=lambda: (commit,state))
     monkeypatch.setattr(script,'GitHubCaptureTransport',lambda *a,**k: fake)
     order = []
-    monkeypatch.setattr(script,'recover',lambda *a,**k: order.append('recovered') or [commit])
+    def recover(transport, *, on_commit, include_artifacts):
+        assert include_artifacts
+        order.append('recovered')
+        on_commit(commit, state)
+        return [commit]
+    monkeypatch.setattr(script, 'recover', recover)
     monkeypatch.setattr(script,'publish_index',lambda *a: order.append('index'))
     def forbidden(*a,**k):raise AssertionError('recovery must not call a provider or reserve credits')
     monkeypatch.setattr(script,'reserve_hosted',forbidden)
     monkeypatch.setattr(script,'load_credentials',forbidden)
-    script.main()
+    assert script.run() == 0
     assert order == ['recovered','index']
 
 

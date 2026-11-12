@@ -1,36 +1,60 @@
 --- a/scripts/offline_refresh.py
 +++ b/scripts/offline_refresh.py
-@@ -18,6 +18,7 @@
+@@ -9,15 +9,16 @@
+ import sys
+ import time
+ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
+-from backtest_data.offline.acquisition import acquire_tick, qualify_sec_source
++from backtest_data.offline.acquisition import acquire_tick
+ from backtest_data.offline.archives import build_bundles
+ from backtest_data.offline.budget import reserve_hosted
+-from backtest_data.offline.contracts import decode,canonical_bytes,MAX_MANIFEST_BYTES
++from backtest_data.offline.contracts import decode
+ from backtest_data.offline.native import CaptureHTTP, NativeClients
+ from backtest_data.offline.transport import GitHubCaptureTransport
  from backtest_data.credentials import load_credentials
  from backtest_data.remote.releases import github
  from offline_publication import GitHubError
 +from offline_outbox import recover, acknowledge, remove_local, output
- 
- 
+
+
  def publish_index(gh, repo, commit, state, work):
-@@ -56,7 +57,7 @@
- 
- 
- def main():
+@@ -55,8 +56,8 @@
+         return
+
+
+-def main():
 -    started=time.monotonic(); parser=argparse.ArgumentParser(description=__doc__)
++def main(progress):
 +    parser=argparse.ArgumentParser(description=__doc__)
      parser.add_argument('--work',type=Path,required=True); parser.add_argument('--budget-seconds',type=int,default=5400)
      args=parser.parse_args()
      if not 60<=args.budget_seconds<=5400:raise ValueError('bounded capture run with export margin required')
-@@ -74,12 +75,21 @@
+@@ -74,36 +75,81 @@
      if catalog_hash!=configuration['catalog_sha256']:raise ValueError('catalog identity hash mismatch')
      catalog=decode(content); catalog['catalog_sha256']=catalog_hash
      transport=GitHubCaptureTransport(repo,gh=gh,workspace=args.work/'transport',stream=configuration['stream_id'],catalog_sha256=catalog_hash)
 -    state=transport.load_latest_state() or None
-+    recovered=recover(transport,on_commit=lambda commit,state:publish_index(gh,repo,commit,state,args.work),include_artifacts=True)
-+    verified=transport.load_latest_verified_state()
-+    state=verified[1] if verified else None
-+    if verified:publish_index(gh,repo,verified[0],state,args.work)
++    def finalize_index(commit, state, publication_state):
++        progress.update(publication_state=publication_state, phase='source_index')
++        output(publication_state=publication_state)
++        publish_index(gh, repo, commit, state, args.work)
++        output(source_index='verified')
++        progress['phase'] = 'pending_cleanup'
++
++    recovered = recover(
++        transport,
++        on_commit=lambda commit, state: finalize_index(commit, state, 'recovered'),
++        include_artifacts=True,
++    )
 +    if recovered:
-+        output(publication_state='recovered')
 +        print(json.dumps({'status':'offline_pending_recovered','tags':[commit.tag for commit in recovered],
 +                          'new_provider_requests':0,'coverage_complete':False}),flush=True)
 +        return
++    verified = transport.load_latest_verified_state()
++    state = verified[1] if verified else None
++    if verified:
++        publish_index(gh, repo, verified[0], state, args.work)
      budget=reserve_hosted(gh,repo,stream=configuration['stream_id'],catalog_sha256=catalog_hash,
          run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
          work=args.work/'quota',now=datetime.now(timezone.utc))
@@ -40,28 +64,71 @@
      http=CaptureHTTP(budget,deadline=started+args.budget_seconds)
      try:
          credentials=load_credentials(sources=['alpaca','sec','opendart']); client=NativeClients(http,credentials)
-@@ -96,6 +106,10 @@
+-        qualification=qualify_sec_source(catalog,client) if os.environ.get('QUALIFY_SEC')=='true' else []
+-        qualification_bytes=sum(len(content) for content in {capture['content_sha256']:content
+-            for capture,content in qualification}.values())
+-        qualification_manifest=sum(len(canonical_bytes({'asset':'captures-0032.zip','capture':capture}))+1
+-            for capture,_ in qualification)
+-        updated,captures=acquire_tick(catalog,state,{source:client for source in ('alpaca','sec','opendart')},
+-            now=datetime.now(timezone.utc),deadline=started+args.budget_seconds,max_steps=20000,
+-            max_capture_bytes=256*1024**2-qualification_bytes,
+-            max_capture_manifest_bytes=MAX_MANIFEST_BYTES-64*1024-qualification_manifest)
+-        captures=qualification+captures
++        updated, captures = acquire_tick(
++            catalog, state, {name: client for name in ('alpaca', 'sec', 'opendart')},
++            now=datetime.now(timezone.utc), deadline=started+args.budget_seconds, max_steps=20000,
++        )
          updated['used_calls']=budget.used
          commit=transport.publish(build_bundles(captures),updated)
-         publish_index(gh,repo,commit,updated,args.work)
-+        pending,files=transport.pending_publication
-+        if acknowledge(transport,pending,commit,files):remove_local(transport,pending)
-+        else:output(pending_cleanup='deferred')
-+        output(publication_state='committed')
+-        publish_index(gh,repo,commit,updated,args.work)
++        finalize_index(commit, updated, 'committed')
++        pending, files = transport.pending_publication
++        if acknowledge(transport, pending, commit, files):
++            remove_local(transport, pending)
++            output(pending_cleanup='verified')
++        else:
++            output(pending_cleanup='deferred')
          print(json.dumps({'status':'offline_capture_committed','tag':commit.tag,'captures':len(captures),
              'used_calls':budget.used,'provider_status':updated['provider_status'],'coverage_complete':False}))
      finally:http.close()
-@@ -104,6 +118,8 @@
- if __name__=='__main__':
-     try:main()
+
+
+-if __name__=='__main__':
+-    try:main()
++def run():
++    progress = {}
++    try:
++        main(progress)
++        return 0
      except Exception as exc:
 -        print(json.dumps({'status':'offline_capture_failed','error_type':type(exc).__name__,
-+        deferred=getattr(exc,'retryable',False)
-+        output(publication_state='deferred' if deferred else 'failed')
-+        print(json.dumps({'status':'offline_publication_deferred' if deferred else 'offline_capture_failed','error_type':type(exc).__name__,
-                           **(exc.safe_details() if hasattr(exc,'safe_details') else {})}),flush=True)
+-                          **(exc.safe_details() if hasattr(exc,'safe_details') else {})}),flush=True)
 -        raise SystemExit(2)
-+        raise SystemExit(0 if deferred else 2)
++        details = exc.safe_details() if isinstance(exc, GitHubError) else {}
++        if progress.get('publication_state'):
++            phase = progress['phase']
++            output(**{phase: 'deferred'})
++            print(json.dumps({
++                'status': 'offline_postpublication_attention',
++                'publication_state': progress['publication_state'],
++                'phase': phase,
++                'error_type': type(exc).__name__,
++                **details,
++            }), flush=True)
++            print(f'::warning::Core checkpoint is published. Review {phase} before closing the run.')
++            return 0
++        deferred = getattr(exc, 'retryable', False)
++        output(publication_state='deferred' if deferred else 'failed')
++        print(json.dumps({
++            'status': 'offline_publication_deferred' if deferred else 'offline_capture_failed',
++            'error_type': type(exc).__name__,
++            **details,
++        }), flush=True)
++        return 0 if deferred else 2
++
++
++if __name__ == '__main__':
++    raise SystemExit(run())
 --- a/src/backtest_data/offline/transport.py
 +++ b/src/backtest_data/offline/transport.py
 @@ -136,10 +136,30 @@
@@ -202,3 +269,31 @@
          if not read or error.status not in {None,408,429,500,502,503,504} or attempt==3:raise error
          time.sleep(2**(attempt+1))
  
+--- a/src/backtest_data/offline/acquisition.py
++++ b/src/backtest_data/offline/acquisition.py
+@@ -440,25 +440,6 @@
+          'instance_key': 'companyfacts:' + identifier, 'disclosure_profile': 'periodic_report',
+          'source_request_metadata': {}, 'companyfacts': {'cik': identifier,
+             'accession': accession, 'form': form, 'filing_date': filing.get('filingDate')}})]
+-
+-
+-def qualify_sec_source(catalog,client):
+-    """One manual hosted source probe; never changes the discovery checkpoint."""
+-    identifier='CIK0000320193'
+-    members=[member for member in catalog.get('sec_issuers',[]) if member['identifier']==identifier]
+-    if len(members)!=1: raise ValueError('qualification issuer must belong to original full target')
+-    payload=json.loads(client.sec_get('https://data.sec.gov/submissions/'+identifier+'.json').content)
+-    rows=[row for row in _sec_submission_rows(payload,identifier) if row.get('form') in PERIODIC_FORMS]
+-    if not rows: raise ValueError('periodic source qualification filing unavailable')
+-    filing=max(rows,key=lambda row:(row.get('filingDate',''),row.get('accessionNumber','')))
+-    client.sec_archive_unavailable=True
+-    values=_sec_filing({'member':members[0],'filing':filing},client)
+-    if not values: raise ValueError('source qualification numeric evidence unavailable')
+-    from .contracts import make_capture
+-    return [(make_capture(source=capture['source'],kind=capture['kind'],entity_id=capture['entity_id'],
+-        captured_at=capture['captured_at'],content=content,
+-        metadata={**capture['metadata'],'capture_purpose':'source_qualification'}),content)
+-        for capture,content in values]
+
+
+ def _sec_step(state, members, client, now):
