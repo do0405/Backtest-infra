@@ -387,15 +387,33 @@
 +        pending.rename(destination)
 --- a/scripts/remote_extended_cycle.py
 +++ b/scripts/remote_extended_cycle.py
-@@ -6,6 +6,7 @@
+@@ -5,17 +5,23 @@
+ import os
  from pathlib import Path
  import shutil
++import subprocess
  import sys
 +import time
  import traceback
++from tempfile import TemporaryDirectory
++from zipfile import BadZipFile
  sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
  
-@@ -28,7 +29,9 @@
+ from backtest_data.db import make_engine,transaction,utcnow
+ from backtest_data.remote.archives import restore
+-from backtest_data.remote.bundle import read_manifest,digest
++from backtest_data.remote.bundle import read_manifest,digest,iter_bundle_rows
+ from backtest_data.remote.codec import unpack
+ from backtest_data.remote.encrypted import encrypt_file,decrypt_file,decode_key,MAX_PRIVATE_ASSET,HEADER
+ from backtest_data.remote.extended import configure_rate_partitions,forward_jobs,create_resume_store,restrict_unadmitted_alpaca
+-from backtest_data.remote.extended_sync import read_encrypted_commit
++from backtest_data.remote.extended_sync import bundle_receipts,read_encrypted_commit
++from backtest_data.remote.extra_cadence import price_ready_date
++from backtest_data.remote.extra_price_reconcile import candidate_price_keys,reconcile_price_queue,stored_price_keys
+ from backtest_data.remote.extra_quotas import PARTITIONS,reserve_allowance,quota_ready
+ from backtest_data.remote.folder import FolderTransport
+ from backtest_data.remote.planner import validate_ownership
+@@ -28,7 +34,9 @@
  from backtest_data.remote.identity import validate_raw_identity_index
  from backtest_data.remote.resume import LazyWindowResolver,window_snapshot,compact_windows
  from backtest_data.remote.paced_publication import publish_release
@@ -406,15 +424,38 @@
  
  
  def publication_summary(head,tag,state):
-@@ -46,6 +49,7 @@
+@@ -45,7 +53,30 @@
+         'source_handler_status_counts':counts,'coverage_complete':False}
  
  
++def predecessor_price_evidence(gh,repo,release,prior,work,*,key,candidates):
++    """Read one immutable delta without importing its raw rows into the new run."""
++    if not candidates:
++        return set(),'no_candidates'
++    try:
++        with TemporaryDirectory(prefix='price-evidence-',dir=work) as directory:
++            root = Path(directory)
++            name = 'delta.zip.enc'
++            asset = download_asset(gh,repo,release,name,root,max_bytes=128*1024**2)
++            stream = prior['stream_id']
++            clear = decrypt_file(asset,root/'delta.zip',key=key,
++                binding=f"{stream}:{prior['start_sequence']}:delta.zip",record=prior['files'][name])
++            store = root/'store'
++            restore(clear,store,512*1024**2)
++            receipts = bundle_receipts(store,prior)
++            rows = (row for receipt in receipts for row in iter_bundle_rows(
++                store/'bundles'/receipt['bundle_id'],expected_manifest_hash=receipt['manifest_hash']))
++            return stored_price_keys(rows,candidates),'verified_predecessor_delta'
++    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, BadZipFile):
++        return set(),'predecessor_delta_unavailable'
++
++
  def main(argv=None):
 +    acquisition_deadline=time.monotonic()+100*60
      parser=argparse.ArgumentParser();parser.add_argument('--work',required=True,type=Path)
      parser.add_argument('--budget-seconds',type=int,default=4800);args=parser.parse_args(argv)
      if not 30<=args.budget_seconds<=4800:raise ValueError('bounded extra-source batch required')
-@@ -74,14 +78,35 @@
+@@ -74,14 +105,35 @@
          checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
          previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
      task_binding=make_binding(configuration,stream,start_sequence=sequence)
@@ -451,11 +492,20 @@
      readiness=configuration.get('quota_partition_ready',{})
      allowance=None;fsc_allowance=None
      if readiness.get('alpha_vantage') is True and quota_ready(configuration,'alpha_vantage',utcnow()):
-@@ -127,13 +152,15 @@
+@@ -127,13 +179,24 @@
          checkpoint['raw_identity_archive']=archive.checkpoint_state()
          resolver=LazyWindowResolver(engine,gh=gh,repo=repo,stream=stream,bootstrap_hash=binding['sha256'],key=key,
              work=work/'lazy-resume',raw_root=raw)
 +        cycle_as_of=utcnow()
++        if prior is not None and configuration.get('etf_cadence') == 'split_daily_weekly_v1':
++            ready_dates = {source: price_ready_date(source,cycle_as_of) for source in ('kis','kis_overseas')}
++            candidates = candidate_price_keys(checkpoint.get('task_state', []),ready_dates)
++            stored, evidence = predecessor_price_evidence(
++                gh,repo,release,prior,work,key=key,candidates=candidates)
++            counts = reconcile_price_queue(checkpoint,ready_dates=ready_dates,stored=stored)
++            print(json.dumps({'status':'extra_price_queue_reconciled',
++                'previous_sequence':prior['end_sequence'],'previous_tag':prior_tag,
++                'stored_evidence':evidence,'by_market':counts}),flush=True)
          with raw_identity_registration(archive):
 -            result=run_cycle(engine,raw,ownership=configuration,planned_jobs=partial(forward_jobs,engine,configuration,as_of=utcnow()),
 +            result=run_cycle(engine,raw,ownership=configuration,planned_jobs=partial(forward_jobs,engine,configuration,as_of=cycle_as_of),
@@ -469,7 +519,7 @@
          head=result['head'];state=unpack(read_manifest(store/'bundles'/head['bundle_id'])['checkpoint'])
          state.update(handoff_id=configuration['handoff_id'],forward_start=configuration['forward_start'])
          tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
-@@ -143,8 +170,14 @@
+@@ -143,8 +206,14 @@
              scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
              resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
              state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
@@ -485,7 +535,7 @@
          # Initial bootstrap did not occupy the state path; all files use fresh
          # names in this generation even when a predecessor was restored.
          zip_store(resumed,work/'next-resume.zip')
-@@ -164,7 +197,7 @@
+@@ -164,7 +233,7 @@
              'created_at':utcnow().isoformat(),'coverage_complete':False}
          commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
          read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
@@ -496,7 +546,7 @@
              target='main',control_target=True,title='Encrypted extra-source checkpoint '+str(head['sequence']),
 --- a/src/backtest_data/remote/extra_cadence.py
 +++ b/src/backtest_data/remote/extra_cadence.py
-@@ -1,20 +1,35 @@
+@@ -1,20 +1,37 @@
  """Fresh Extra price/official plans; immutable old requests remain untouched."""
 +from collections import Counter
  from copy import deepcopy
@@ -507,18 +557,22 @@
 +from ..ingestion.jobs import MAX_HISTORY_JOB_IDS, logical_request, stable_hash
 +from ..prices.adapters.kis_overseas import overseas_daily_ready_date
  from ..remote_updates import build_update_jobs
- 
- 
+-
+-
 -def history_rotation(tasks,previous,*,source,as_of,limit=128):
++from .extra_price_reconcile import MARKET_BY_SOURCE, market_closed
++
++
 +MAX_DAILY_JOBS_PER_LANE = 17_758
 +DAILY_LANES = {'daily_latest', 'daily_catchup'}
 +LIVE_STATUSES = {'pending', 'retry', 'running'}
 +
 +
 +def price_ready_date(source, as_of):
-+    if source == 'kis_overseas':
-+        return overseas_daily_ready_date(as_of)
-+    return provider_ready_date(source, as_of)
++    day = overseas_daily_ready_date(as_of) if source == 'kis_overseas' else provider_ready_date(source, as_of)
++    while market_closed(MARKET_BY_SOURCE[source], day):
++        day -= timedelta(days=1)
++    return day
 +
 +
 +def history_rotation(tasks,previous,*,source,as_of,limit=MAX_HISTORY_JOB_IDS):
@@ -537,7 +591,7 @@
      def due(task):
          retry=task.get('checkpoint',{}).get('retry_after')
          if retry is None:return True
-@@ -24,13 +39,15 @@
+@@ -24,13 +41,15 @@
      eligible={identity for identity,task in retained.items() if due(task)}
      queue=[identity for identity in previous if identity in retained]
      if not any(identity in eligible for identity in queue):
@@ -555,7 +609,7 @@
      return [identity for identity in queue if identity not in served]
  
  
-@@ -38,23 +55,57 @@
+@@ -38,23 +57,58 @@
      return [('latest',seconds*3/5),('history',seconds/4),('correction',seconds*3/20)]
  
  
@@ -597,17 +651,17 @@
 +        as_of=as_of, hard_deadline=hard_deadline, history_ids={} if history_ids is None else {slot['source']: history_ids})
 +
 +
-+def _advance_covered(day, until, covered):
++def _advance_covered(day, until, covered, *, market):
 +    while day < until:
 +        next_day = day + timedelta(days=1)
-+        if next_day.weekday() < 5 and not covered(next_day):
++        if not market_closed(market, next_day) and not covered(next_day):
 +            break
 +        day = next_day
 +    return day
 +
 +
-+def _weekday(day):
-+    while day.weekday() >= 5:
++def _next_session(day, market):
++    while market_closed(market, day):
 +        day += timedelta(days=1)
 +    return day
  
@@ -615,15 +669,17 @@
  def price_progress(members,checkpoint,*,sources,forward_start,as_of):
      result={}
      for source in sorted(sources):
-         expected={row['security_id'] for row in members if row['market']==('KR' if source=='kis' else 'US')}
+-        expected={row['security_id'] for row in members if row['market']==('KR' if source=='kis' else 'US')}
 -        groups={};numeric=set();empty=set();unsupported=set()
++        market = MARKET_BY_SOURCE[source]
++        expected={row['security_id'] for row in members if row['market']==market}
 +        archived=checkpoint.get('completed_price_observations',{}).get(source,{})
 +        groups={};numeric=set(archived.get('numeric',()))&expected
 +        empty=set(archived.get('valid_empty',()))&expected;unsupported=set()
          for task in checkpoint.get('task_state',[]):
              if task['source']!=source or task['domain']!='prices' or task['entity_id'] not in expected:continue
              request=task['request'];start=date.fromisoformat(request['output_start']);end=date.fromisoformat(request['output_end'])
-@@ -71,14 +122,15 @@
+@@ -71,14 +125,15 @@
              for (start,end),entry in groups.items():
                  if start<=day<=end:found.update(entry[axis])
              return bool(expected) and found==expected
@@ -636,14 +692,14 @@
 -        while cutoff<current and covered(cutoff+timedelta(days=1),'terminal'):cutoff+=timedelta(days=1)
 -        missing=cutoff+timedelta(days=1)
 -        while missing<current and covered(missing,'admitted'):missing+=timedelta(days=1)
-+        cutoff=_advance_covered(cutoff,current,lambda day:covered(day,'terminal'))
-+        missing=_weekday(cutoff+timedelta(days=1))
++        cutoff=_advance_covered(cutoff,current,lambda day:covered(day,'terminal'),market=market)
++        missing=_next_session(cutoff+timedelta(days=1),market)
 +        while missing<current and covered(missing,'admitted'):
-+            missing=_weekday(missing+timedelta(days=1))
++            missing=_next_session(missing+timedelta(days=1),market)
          result[source]={'expected_entities':len(expected),'request_completed_through':cutoff.isoformat(),
              'first_unadmitted_date':missing.isoformat(),'unsupported_entities':len(unsupported),
              'numeric_observed_entities':len(numeric),'valid_empty_entities':len(empty),
-@@ -86,24 +138,191 @@
+@@ -86,24 +141,191 @@
      return result
  
  
@@ -1542,3 +1598,142 @@
              "cursor_earliest_session": min(source_sessions).isoformat() if pagination_valid and source_sessions else None,
              "source_row_count": len(source_sessions), "normalized_row_coverage_complete": response_valid and pagination_valid and rejected == 0,
              "response_valid": response_valid, "pagination_valid": pagination_valid,
+--- /dev/null
++++ b/src/backtest_data/remote/extra_price_reconcile.py
+@@ -0,0 +1,136 @@
++"""Conservative reconciliation for owned one-session KIS collection tasks."""
++
++from datetime import date
++
++
++MARKET_BY_SOURCE = {'kis': 'KR', 'kis_overseas': 'US'}
++WAITING = ('pending', 'retry')
++US_VENUES = {'NAS', 'NYS', 'AMS'}
++# Positive full-day closure evidence for the 2026 forward window. Dates
++# outside these lists are never presumed closed merely for lack of a row.
++# KRX: https://open.krx.co.kr/contents/MKD/01/0110/01100305/MKD01100305.jsp
++# NYSE (including American) and Nasdaq:
++# https://www.nyse.com/trade/hours-calendars
++# https://nasdaqtrader.com/Trader.aspx?id=Calendar
++CONFIRMED_HOLIDAYS = {
++    'KR': {date(2026, 10, 9), date(2026, 12, 25), date(2026, 12, 31)},
++    'US': {date(2026, 11, 26), date(2026, 12, 25)},
++}
++
++
++def market_closed(market, day):
++    return day.weekday() >= 5 or day in CONFIRMED_HOLIDAYS[market]
++
++
++def _request_key(task):
++    source = task['source']
++    request = task['request']
++    market = MARKET_BY_SOURCE.get(source)
++    lane = request.get('cadence_lane')
++    day = request.get('output_end')
++    if (market is None or task['domain'] != 'prices' or request.get('market') != market
++            or lane not in ('daily_latest', 'daily_catchup')
++            or request.get('refresh_policy') != f'extra_{lane}_v6'
++            or not isinstance(day, str) or request.get('output_start') != day):
++        return None
++    try:
++        session = date.fromisoformat(day)
++    except ValueError:
++        return None
++    if market == 'KR':
++        return market, task['entity_id'], session, 'KRX', None
++    venue, symbol = request.get('exchange'), request.get('provider_symbol')
++    if request.get('mapping_status') != 'qualified' or venue not in US_VENUES or not symbol:
++        return None
++    return market, task['entity_id'], session, venue, symbol
++
++
++def candidate_price_keys(tasks, ready_dates):
++    keys = set()
++    for task in tasks:
++        if task['status'] in WAITING and (key := _request_key(task)) and key[2] < ready_dates[task['source']]:
++            keys.add(key)
++    return keys
++
++
++def stored_price_keys(rows, candidates):
++    """Read positive evidence from verified bundle rows; ignore all other feeds."""
++    observations = {}
++    accepted = {}
++    disputed = set()
++    contracts = {}
++    for row in rows:
++        table, value = row['table'], row['values']
++        if table == 'source_contract' and value['domain'] == 'prices':
++            contracts[value['id']] = value['source'], value['market']
++        elif table == 'selection_decision' and value['record_domain'] == 'price_observation':
++            if value['status'] != 'accepted':
++                disputed.add(value['record_id'])
++            elif value['evidence_grade'] == 'contract_verified':
++                accepted[value['record_id']] = value['rule_version']
++        elif table == 'price_observation' and value['basis'] == 'as_traded':
++            venue, feed = value['venue'], value['feed']
++            market, symbol = None, None
++            if (venue, feed, value['currency']) == ('KRX', 'kis:krx', 'KRW'):
++                market = 'KR'
++            elif venue in US_VENUES and feed == f'kis:us:{venue}' and value['currency'] == 'USD':
++                market, symbol = 'US', value['evidence'].get('source_symbol')
++            key = market, value['security_id'], value['session'], venue, symbol
++            if key in candidates:
++                observations[value['id']] = key, value['source_contract_id']
++    routes = {'KR': ('kis', 'raw_price_structure_v1'),
++              'US': ('kis_overseas', 'kis_overseas_raw_price_structure_v1')}
++    proven = set()
++    for identity, (key, contract) in observations.items():
++        market = key[0]
++        source, rule = routes[market]
++        if (identity not in disputed and accepted.get(identity) == rule
++                and contracts.get(contract) == (source, market)):
++            proven.add(key)
++    return proven
++
++
++def reconcile_price_queue(checkpoint, *, ready_dates, stored):
++    """Mark only positively proved requests terminal, before the planner runs."""
++    stats = {market: {status: dict(waiting=0, eligible=0, market_closed=0, stored_daily_bar=0, conflicting_evidence=0)
++                      for status in WAITING} for market in MARKET_BY_SOURCE.values()}
++    completed, cleaned, job_ids = set(), set(), set()
++    for task in checkpoint.get('task_state', ()):
++        source, status = task['source'], task['status']
++        if source not in MARKET_BY_SOURCE or status not in WAITING:
++            continue
++        counts = stats[MARKET_BY_SOURCE[source]][status]
++        counts['waiting'] += 1
++        key = _request_key(task)
++        if key is None or key[2] >= ready_dates[source]:
++            continue
++        counts['eligible'] += 1
++        closed = market_closed(key[0], key[2])
++        found = key in stored
++        if closed and found:
++            counts['conflicting_evidence'] += 1
++            continue
++        if closed:
++            task['status'] = 'superseded'
++            task['checkpoint'] = {'reason': 'verified_exchange_closed'}
++            counts['market_closed'] += 1
++        elif found:
++            task['status'] = 'succeeded'
++            task['checkpoint'] = {'reason': 'verified_published_daily_bar', 'normalized_rows_total': 1,
++                                  'source_rows_total': 1, 'response_valid': True, 'pagination_valid': True}
++            completed.add(task['identity_hash'])
++            counts['stored_daily_bar'] += 1
++        else:
++            continue
++        cleaned.add(task['identity_hash'])
++        job_ids.add(task['id'])
++    if completed:
++        checkpoint['completed_task_ids'] = sorted(set(checkpoint.get('completed_task_ids', ())) | completed)
++    if cleaned and 'unfinished_task_ids' in checkpoint:
++        checkpoint['unfinished_task_ids'] = [key for key in checkpoint['unfinished_task_ids'] if key not in cleaned]
++    if job_ids and 'price_history_queue' in checkpoint:
++        checkpoint['price_history_queue'] = {
++            source: [job for job in queue if job not in job_ids]
++            for source, queue in checkpoint['price_history_queue'].items()
++        }
++    return stats

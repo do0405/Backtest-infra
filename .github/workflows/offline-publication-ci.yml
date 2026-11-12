@@ -7,6 +7,8 @@ on:
       - 'scripts/build_offline_runtime.py'
       - 'tests/unit/test_offline*'
       - 'tests/runtime/**'
+      - 'scripts/extra-task-archive-v9.patch'
+      - 'scripts/remote_extended_launcher.py'
       - '.github/workflows/offline*'
   pull_request:
     paths:
@@ -14,6 +16,8 @@ on:
       - 'scripts/build_offline_runtime.py'
       - 'tests/unit/test_offline*'
       - 'tests/runtime/**'
+      - 'scripts/extra-task-archive-v9.patch'
+      - 'scripts/remote_extended_launcher.py'
       - '.github/workflows/offline*'
   workflow_dispatch:
 permissions:
@@ -59,5 +63,24 @@ jobs:
         run: python -m pip install . pytest==8.4.2
       - name: Verify HTTP, workflow, pin and maintenance boundaries
         run: python -B -m pytest tests/unit/test_offline* tests/unit/test_remote_releases.py -q -p no:cacheprovider
+      - name: Verify the pinned Extra runtime and reconciliation
+        run: |
+          python - <<'PY'
+          import hashlib, io, os, urllib.request, zipfile
+          from pathlib import Path
+          from scripts.remote_extended_launcher import ARCHIVE_BASE_SHA256, apply_task_archive_overlay
+          url = ('https://github.com/do0405/Backtest-infra/releases/download/'
+                 'extra-task-archive-v8-20261014-94adf2ef27ae/runtime.zip')
+          with urllib.request.urlopen(url, timeout=60) as response:
+              data = response.read(4 * 1024 * 1024)
+          digest = hashlib.sha256(data).hexdigest()
+          assert digest == ARCHIVE_BASE_SHA256
+          source = Path(os.environ['RUNNER_TEMP']) / 'extra-runtime'
+          with zipfile.ZipFile(io.BytesIO(data)) as archive:
+              archive.extractall(source)
+          apply_task_archive_overlay(source, digest)
+          PY
+          EXTRA_RUNTIME_SOURCE="$RUNNER_TEMP/extra-runtime" python -B -m pytest -q -p no:cacheprovider \
+            tests/runtime/test_extra_price_reconcile.py tests/runtime/test_extra_price_queue.py tests/runtime/test_extra_task_archive.py
       - name: Verify interruption, fresh-process recovery and malicious packages
         run: python -B -m pytest tests/runtime -q -p no:cacheprovider

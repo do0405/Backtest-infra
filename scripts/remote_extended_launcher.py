@@ -11,8 +11,8 @@ import zipfile
 
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='c286220e451c554e71203c9f9c088a88535f6cded84e2a777c1a723df06af78c'
-CYCLE_SOURCE_SHA256='815e63cfac13da66918493ff96f461a6b098b72115721258cc12a9b73f06b6d3'
-ARCHIVE_PATCH_SHA256='78a92fcde4978e7c80e2f9218aded0ea3c12ab3be9eb4c647e7dda0ecb22aacf'
+CYCLE_SOURCE_SHA256='e076d3f2b22522de51dd5c4494d5003065fb58fd7630deb7f9c0f7ca0a657255'
+ARCHIVE_PATCH_SHA256='498a4f5797bf5a53e6ec4718811ace9ecc4d1de3c114aaa1e9a88fd7a300a5cc'
 
 
 def command(arguments,**kwargs):
@@ -29,7 +29,8 @@ def apply_task_archive_overlay(runtime,base_sha256):
     sources={
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
-        runtime/'src/backtest_data/remote/extra_cadence.py':'120d8e6f9e62c2dc979154afb92dc0db8d9a5a202c60a3c22476a08e575a48af',
+        runtime/'src/backtest_data/remote/extra_cadence.py':'e53cf904c0ae87d666456356df8473d5c7ed1d3f0e0655f465cac3b6bb294e33',
+        runtime/'src/backtest_data/remote/extra_price_reconcile.py':'c06aea9cb5bebcdb6cc6e6625a5a94933c8ad11e19312014c7675cd91632fded',
         runtime/'src/backtest_data/remote/worker.py':'db0a7e1c815bb13a8267e4b6c524d4ca774ff506b615318857d8321061b0f985',
         runtime/'src/backtest_data/ingestion/jobs.py':'44c4a2eb149880c3271bc136c7f2c43d4622a26b9e0dfbee53cc528c40c6944a',
         runtime/'src/backtest_data/prices/storage.py':'a4cd5d85066646bdf7377ba3654193bd738391d8d47a737367754e20f3b9eece',
@@ -39,6 +40,8 @@ def apply_task_archive_overlay(runtime,base_sha256):
         runtime/'src/backtest_data/ingestion/supervisor.py':'9bd31d3288b85231cb8c07c0ab0210dba563986304b63cac1aa2bd680f6e4ae3',
     }
     for source in sources:
+        if source == runtime/'src/backtest_data/remote/extra_price_reconcile.py' and not source.exists():
+            continue
         canonical=source.read_text(encoding='utf-8')
         source.write_text(canonical,encoding='utf-8',newline='\n')
     arguments=['git','-c','core.autocrlf=false','apply']
