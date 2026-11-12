@@ -387,7 +387,7 @@
 +        pending.rename(destination)
 --- a/scripts/remote_extended_cycle.py
 +++ b/scripts/remote_extended_cycle.py
-@@ -1,21 +1,33 @@
+@@ -1,21 +1,34 @@
  """Dedicated fresh-runner extra collection with encrypted state and deltas."""
  import argparse
 +from datetime import datetime
@@ -418,12 +418,13 @@
 +    audit_and_repair_us_mappings, current_master_symbols, read_mapping_catalog,
 +)
 +from backtest_data.remote.extra_price_reconcile import (
-+    candidate_price_keys, expanded_scope_counts, prior_scope_counts, reconcile_price_queue, stored_price_keys,
++    candidate_price_keys, expanded_scope_counts, prior_scope_counts,
++    reconcile_price_queue, stored_price_keys,
 +)
  from backtest_data.remote.extra_quotas import PARTITIONS,reserve_allowance,quota_ready
  from backtest_data.remote.folder import FolderTransport
  from backtest_data.remote.planner import validate_ownership
-@@ -28,7 +40,9 @@
+@@ -28,7 +41,9 @@
  from backtest_data.remote.identity import validate_raw_identity_index
  from backtest_data.remote.resume import LazyWindowResolver,window_snapshot,compact_windows
  from backtest_data.remote.paced_publication import publish_release
@@ -434,7 +435,7 @@
  
  
  def publication_summary(head,tag,state):
-@@ -45,9 +59,98 @@
+@@ -45,9 +60,98 @@
          'source_handler_status_counts':counts,'coverage_complete':False}
  
  
@@ -534,11 +535,16 @@
      if not 30<=args.budget_seconds<=4800:raise ValueError('bounded extra-source batch required')
      configuration=json.loads(os.environ['REMOTE_EXTENDED_OWNERSHIP']);validate_ownership(configuration)
      if configuration.get('version')!=2 or configuration['owner_id']!='extra-forward-v1':raise ValueError('explicit extra forward ownership required')
-@@ -64,6 +167,12 @@
+@@ -64,6 +168,17 @@
      if digest(work/'bootstrap-download/catalog.zip.enc')!=binding['sha256']:raise ValueError('exact bootstrap digest required')
      restore(work/'catalog.zip',work/'catalog',2*1024**3)
      checkpoint=read_state(work/'initial-state.json.gz');releases=inventory(gh,repo,stream)
 +    catalog = read_mapping_catalog(FolderTransport(work/'catalog').committed_bundles(), configuration['manifest_id'])
++    if os.environ.get('EXTRA_US_AGGREGATE_AUDIT') == 'true':
++        from extra_us_coverage_audit import audit_us_coverage
++        audit_us_coverage(gh, repo, releases, configuration, catalog, work, key=key,
++                          restore_task_state=restore_task_state)
++        return
 +    if args.audit_previous_sequence is not None:
 +        current = current_master_symbols()
 +        print(json.dumps(audit_previous_scope(
@@ -547,7 +553,7 @@
      previous=None;prior_hash=None;prior_tag=None;sequence=1;prior=None
      if releases:
          release=releases[-1];path=download_asset(gh,repo,release,'commit.json',work/'previous',max_bytes=1024**2)
-@@ -74,14 +183,17 @@
+@@ -74,14 +189,17 @@
          checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
          previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
      task_binding=make_binding(configuration,stream,start_sequence=sequence)
@@ -569,7 +575,7 @@
      readiness=configuration.get('quota_partition_ready',{})
      allowance=None;fsc_allowance=None
      if readiness.get('alpha_vantage') is True and quota_ready(configuration,'alpha_vantage',utcnow()):
-@@ -127,13 +239,32 @@
+@@ -127,13 +245,32 @@
          checkpoint['raw_identity_archive']=archive.checkpoint_state()
          resolver=LazyWindowResolver(engine,gh=gh,repo=repo,stream=stream,bootstrap_hash=binding['sha256'],key=key,
              work=work/'lazy-resume',raw_root=raw)
@@ -604,7 +610,7 @@
          head=result['head'];state=unpack(read_manifest(store/'bundles'/head['bundle_id'])['checkpoint'])
          state.update(handoff_id=configuration['handoff_id'],forward_start=configuration['forward_start'])
          tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
-@@ -143,8 +274,14 @@
+@@ -143,8 +280,14 @@
              scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
              resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
              state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
@@ -620,7 +626,7 @@
          # Initial bootstrap did not occupy the state path; all files use fresh
          # names in this generation even when a predecessor was restored.
          zip_store(resumed,work/'next-resume.zip')
-@@ -164,7 +301,7 @@
+@@ -164,7 +307,7 @@
              'created_at':utcnow().isoformat(),'coverage_complete':False}
          commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
          read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
@@ -2197,3 +2203,290 @@
 +            'current_master_match': current_reasons,
 +            'current_master_securities': {reason: len(ids) for reason, ids in current_securities.items()},
 +            'applied': applied, 'reused_mapped_request': reused, 'held_existing_mapped_request': held_existing}
+--- /dev/null
++++ b/scripts/extra_us_coverage_audit.py
+@@ -0,0 +1,284 @@
++"""Read-only aggregate comparison of the frozen Extra cohort and public source evidence."""
++
++from collections import Counter, defaultdict
++from datetime import date, datetime
++from gzip import decompress
++from hashlib import sha256
++import io
++import json
++from math import isfinite
++import os
++from urllib.request import urlopen
++from zipfile import BadZipFile, ZipFile
++from zoneinfo import ZoneInfo
++
++from backtest_data.catalog.universe import parse_us_directory
++from backtest_data.catalog.provider_symbols import directory_cqs_symbol
++from backtest_data.remote.encrypted import HEADER, MAX_PRIVATE_ASSET, decrypt_file
++from backtest_data.remote.extended_sync import read_encrypted_commit
++from backtest_data.remote.extra_price_reconcile import UNFINISHED, _provider_route, market_closed
++from backtest_data.remote.releases import download_asset, read_state
++
++
++ROOT = 'https://github.com/do0405/Backtest-infra/releases/download/'
++INDEX = 'https://raw.githubusercontent.com/do0405/Backtest-infra/main/data/offline/core-forward-v1.json'
++DIRECTORIES = {
++    'nasdaq': 'https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt',
++    'other': 'https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt',
++}
++BASELINE = 'data-extra-forward-v1-000000761-r43195996730-a1'
++# Exact old issue identity and dates from the dated Nasdaq notices.
++NASDAQ_EVENTS = {
++    'NATH': ("Nathan's Famous, Inc.", 'official_last_trading_date', date(2026, 10, 23), 'ECA2026-738'),
++    'SUPN': ('Supernus Pharmaceuticals, Inc.', 'official_last_trading_date', date(2026, 10, 30), 'ECA2026-742'),
++    'BWMN': ('Bowman Consulting Group Ltd.', 'official_last_trading_date', date(2026, 11, 5), 'ECA2026-796'),
++    'INDV': ('Indivior Pharmaceuticals, Inc.', 'official_symbol_change', date(2026, 11, 2), 'ECA2026-742'),
++    'SKK': ('SKK Holdings Limited', 'official_symbol_change', date(2026, 10, 12), 'ECA2026-729'),
++}
++
++
++def read(url, limit):
++    with urlopen(url, timeout=35) as response:
++        payload = response.read(limit + 1)
++    if len(payload) > limit:
++        raise ValueError('public evidence exceeds read bound')
++    return payload
++
++
++def _name(value):
++    return ' '.join(value.casefold().split())
++
++
++def _aliases(symbol, fields):
++    return {value for value in (symbol, fields.get('ACT Symbol'), fields.get('CQS Symbol'),
++                                 fields.get('NASDAQ Symbol')) if value}
++
++
++def matching_events(members):
++    result = {}
++    for identity, member in members.items():
++        event = NASDAQ_EVENTS.get(member['symbol'])
++        if not event or member['venue'] != 'NASDAQ':
++            continue
++        issuer = member['name'].split(' - ', 1)[0]
++        if _name(issuer) == _name(event[0]):
++            result[identity] = event
++    return result
++
++
++def listing_status(members):
++    current = defaultdict(list)
++    try:
++        for directory, url in DIRECTORIES.items():
++            payload = read(url, 4*1024**2)
++            if b'File Creation Time' not in payload[-256:]:
++                raise ValueError('complete official directory footer required')
++            for row in parse_us_directory(payload, directory):
++                for alias in _aliases(row.symbol, row.evidence):
++                    current[alias].append(row)
++    except (OSError, ValueError, UnicodeError):
++        return {identity: 'official_directory_unavailable' for identity in members}
++    result = {}
++    for identity, member in members.items():
++        aliases = _aliases(member['symbol'], member.get('evidence') or {})
++        candidates = {row.identifier: row for alias in aliases for row in current.get(alias, ())}
++        matches = [row for row in candidates.values() if row.venue == member['venue']
++                   and _name(row.name) == _name(member['name'])]
++        if len(matches) != 1:
++            result[identity] = 'listing_identity_conflict' if candidates else 'no_current_listing_match'
++        elif matches[0].symbol == member['symbol']:
++            result[identity] = 'listed_same_code_missing_from_kis_master'
++        else:
++            result[identity] = 'listed_official_code_alias'
++    return result
++
++
++def _verify_bars(payload, symbol, low, high):
++    results = set()
++    bars = payload.get('bars')
++    if not isinstance(bars, dict) or not isinstance(rows := bars.get(symbol, []), list):
++        return results
++    for row in rows:
++        try:
++            stamp = datetime.fromisoformat(row['t'].replace('Z', '+00:00'))
++            if stamp.utcoffset() is None:
++                continue
++            day = stamp.astimezone(ZoneInfo('America/New_York')).date()
++            o, h, l, c, v = (row[field] for field in ('o', 'h', 'l', 'c', 'v'))
++            if (low <= day <= high and not market_closed('US', day)
++                    and all(type(value) in (int, float) and isfinite(value) for value in (o, h, l, c, v))
++                    and 0 < l <= min(o, c) <= max(o, c) <= h and v >= 0):
++                results.add(day)
++        except (AttributeError, KeyError, TypeError, ValueError):
++            continue
++    return results
++
++
++def existing_alpaca_coverage(manifest_id, members, windows, verified_listing, events):
++    index = json.loads(read(INDEX, 256*1024))
++    raw = read(ROOT+'offline-core-catalog-v1-20261012/catalog.json', 32*1024**2)
++    if sha256(raw).hexdigest() != index['catalog_sha256']:
++        raise ValueError('Core catalog hash mismatch')
++    catalog = json.loads(raw)
++    if catalog['manifest_id'] != manifest_id:
++        raise ValueError('Extra and Core original target mismatch')
++    core = {}
++    for row in catalog['us_prices']:
++        identity, source = row['entity_id'], row.get('source_member')
++        member = members.get(identity)
++        if (member and source and source['security_id'] == identity and source['identifier'] == member['identifier']
++                and source['symbol'] == member['symbol'] and source['venue'] == member['venue']
++                and row['symbol'] in {member['symbol'], directory_cqs_symbol(source)}):
++            core[identity] = row
++
++    candidates = []
++    tag, digest = index['tag'], index['commit_sha256']
++    retry_entities = unsupported_entities = 0
++    for _ in range(14):
++        if not tag:
++            break
++        raw = read(ROOT+tag+'/commit.json', 8*1024**2)
++        if sha256(raw).hexdigest() != digest:
++            raise ValueError('Core published manifest lineage mismatch')
++        commit = json.loads(raw)
++        if commit['catalog_sha256'] != index['catalog_sha256']:
++            raise ValueError('Core capture catalog binding mismatch')
++        if tag == index['tag']:
++            record = commit['files']['state.json.gz']
++            state_bytes = read(ROOT+tag+'/state.json.gz', record['bytes'])
++            if sha256(state_bytes).hexdigest() != record['sha256']:
++                raise ValueError('Core published queue hash mismatch')
++            state = json.loads(decompress(state_bytes))['sources']['alpaca']
++            retry_entities = len(core.keys() & state.get('price_gaps', {}).keys())
++            unsupported = state.get('unsupported_symbols', {})
++            if isinstance(unsupported, dict):
++                symbols = {row['symbol'] for row in core.values()}
++                unsupported_entities = len(symbols & unsupported.keys())
++        groups = defaultdict(list)
++        for item in commit['captures']:
++            capture = item['capture']
++            identity = capture['entity_id']
++            if capture['source'] != 'alpaca' or identity not in core or identity not in verified_listing:
++                continue
++            metadata = capture['metadata']
++            row = core[identity]
++            if ((metadata.get('feed'), metadata.get('adjustment'), metadata.get('asof')) != ('sip', 'raw', '-')
++                    or metadata.get('source_member') != row['source_member'] or metadata.get('symbol') != row['symbol']):
++                continue
++            low, high = (date.fromisoformat(metadata[field]) for field in ('start', 'end'))
++            if identity in events:
++                high = min(high, events[identity][2])
++            if any(start <= high and low <= end for start, end, _ in windows[identity]):
++                groups[item['asset']].append((identity, row['symbol'], low, high, capture['content_sha256']))
++        for asset, rows in groups.items():
++            candidates.append((tag, asset, commit['files'][asset], rows))
++        tag, digest = commit['previous_tag'], commit['previous_commit_sha256']
++
++    verified = defaultdict(set)
++    tags, errors = [], 0
++    remaining = 768*1024**2
++    candidates.sort(key=lambda item: (-len({row[0] for row in item[3]}), item[0], item[1]))
++    for tag, asset, record, rows in candidates:
++        size = record['bytes']
++        if size > remaining:
++            continue
++        remaining -= size
++        try:
++            payload = read(ROOT+tag+'/'+asset, size)
++            if len(payload) != size or sha256(payload).hexdigest() != record['sha256']:
++                raise ValueError('Core asset hash mismatch')
++            groups = defaultdict(list)
++            for identity, symbol, low, high, content_hash in rows:
++                groups[content_hash].append((identity, symbol, low, high))
++            with ZipFile(io.BytesIO(payload)) as archive:
++                for content_hash, captures in groups.items():
++                    content = archive.read('content/'+content_hash+'.bin')
++                    if sha256(content).hexdigest() != content_hash:
++                        raise ValueError('Alpaca payload hash mismatch')
++                    response = json.loads(content)
++                    for identity, symbol, low, high in captures:
++                        verified[identity].update(_verify_bars(response, symbol, low, high))
++            tags.append(tag)
++        except (OSError, ValueError, KeyError, BadZipFile):
++            errors += 1
++
++    complete, partial, any_rows, full_rows, observed_dates = 0, 0, set(), set(), set()
++    for identity, ranges in windows.items():
++        bars = verified[identity]
++        for start, end, count in ranges:
++            days = {date.fromordinal(n) for n in range(start.toordinal(), end.toordinal()+1)
++                    if not market_closed('US', date.fromordinal(n))}
++            if hits := (bars & days):
++                any_rows.add(identity)
++                observed_dates.update(hits)
++                if hits == days:
++                    full_rows.add(identity)
++                    complete += count
++                else:
++                    partial += count
++    return {'already_in_core_catalog':len(core), 'core_watermark':index['source_watermarks'].get('alpaca'),
++            'core_retry_securities':retry_entities, 'core_unsupported_symbol_count':unsupported_entities,
++            'core_captures_verified':sorted(set(tags)), 'core_asset_read_errors':errors,
++            'securities_with_any_period_bar':len(any_rows), 'securities_with_complete_request':len(full_rows),
++            'requests_with_all_market_days_verified':complete, 'requests_with_some_market_days_verified':partial,
++            'observed_start':min(observed_dates).isoformat() if observed_dates else None,
++            'observed_end':max(observed_dates).isoformat() if observed_dates else None}
++
++
++def audit_us_coverage(gh, repo, releases, configuration, catalog, work, *, key, restore_task_state):
++    if os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch':
++        raise ValueError('read-only manual audit required')
++    stream = configuration['owner_id']
++    release = next(row for row in releases if row['tag_name'] == BASELINE)
++    root = work/'coverage-audit'
++    commit = download_asset(gh, repo, release, 'commit.json', root/'previous', max_bytes=1024**2)
++    prior = read_encrypted_commit(commit, stream=stream, bootstrap_hash=configuration['bootstrap']['sha256'], tag=BASELINE)
++    asset = download_asset(gh, repo, release, 'state.json.gz.enc', root/'previous',
++                           max_bytes=MAX_PRIVATE_ASSET+HEADER.size+16)
++    clear = decrypt_file(asset, root/'state.json.gz', key=key,
++                         binding=f"{stream}:{prior['start_sequence']}:state.json.gz",
++                         record=prior['files']['state.json.gz.enc'])
++    checkpoint = read_state(clear)
++    if (checkpoint.get('task_archive_assets') is None or checkpoint.get('handoff_id') != configuration['handoff_id']
++            or checkpoint.get('forward_start') != configuration['forward_start']):
++        raise ValueError('owned external task archive required')
++    checkpoint, _ = restore_task_state(gh, repo, releases, configuration, prior, checkpoint, root, key=key)
++    windows, reasons = defaultdict(Counter), Counter()
++    for task in checkpoint['task_state']:
++        status, source, request = task['status'], task['source'], task['request']
++        if status not in UNFINISHED:
++            continue
++        reason = task['checkpoint'].get('reason') or request.get('mapping_reason') or 'none'
++        reason = reason if reason in {'none', 'restored_exact_master_mapping_unavailable', 'source_response_or_pagination_gap',
++                                      'source_no_data', 'source_row_validation_gap', 'source_pagination_did_not_progress',
++                                      'source_no_data_or_validation_gap', 'api_traversal_complete_recent_interval_deferred',
++                                      'exact_master_mapping_unavailable', 'kis_overseas_mapping_unavailable',
++                                      '403', '429', '503', 'empty', 'budget_deferred', 'provider_error'} else 'other'
++        if reason == 'none' and status == 'retry' and task['checkpoint'].get('cursor_end'):
++            reason = 'pagination_cursor_saved'
++        lane = request.get('cadence_lane')
++        lane = lane if lane in {'daily_latest','daily_catchup','weekly_correction'} else 'legacy'
++        reasons[source, status, lane, reason] += 1
++        if (source == 'kis_overseas' and task['domain'] == 'prices' and request.get('market') == 'US'
++                and _provider_route(task) is None and task['entity_id'] in catalog['members']):
++            start, end = (date.fromisoformat(request[field]) for field in ('output_start', 'output_end'))
++            windows[task['entity_id']][start, end] += 1
++    members = {identity: catalog['members'][identity] for identity in windows}
++    del checkpoint
++    windows = {identity: [(start, end, count) for (start, end), count in rows.items()] for identity, rows in windows.items()}
++    print(json.dumps({'status':'us_coverage_queue_reasons', 'sequence':prior['end_sequence'],
++                      'unfinished':sum(reasons.values()), 'queue':[[*labels,count] for labels,count in sorted(reasons.items())],
++                      'cohort_securities':len(members), 'cohort_requests':sum(sum(r[2] for r in ranges) for ranges in windows.values())}),
++          flush=True)
++    classes = listing_status(members)
++    events = matching_events(members)
++    classes.update({identity: event[1] for identity, event in events.items()})
++    exchanges = Counter(members[identity]['venue'] for identity, reason in classes.items()
++                        if reason == 'listed_same_code_missing_from_kis_master')
++    print(json.dumps({'status':'us_coverage_listing_audit', 'listing_counts':Counter(classes.values()),
++                      'listed_without_kis_by_exchange':exchanges,
++                      'official_notice_refs':sorted({event[3] for event in events.values()})}), flush=True)
++    verified_listing = {identity for identity, reason in classes.items()
++                        if reason.startswith(('listed_', 'official_'))}
++    coverage = existing_alpaca_coverage(configuration['manifest_id'], members, windows, verified_listing, events)
++    print(json.dumps({'status':'us_coverage_alpaca_audit', **coverage}), flush=True)

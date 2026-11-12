@@ -11,8 +11,8 @@ import zipfile
 
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='c286220e451c554e71203c9f9c088a88535f6cded84e2a777c1a723df06af78c'
-CYCLE_SOURCE_SHA256='64b04e3532894f7aa3cb9aec93c6c335751c3837152e58fcc6fba8c85fdd07aa'
-ARCHIVE_PATCH_SHA256='d34fb8a1af3a76e92b49f6567dac2fbdf9ea1a8e978d4df59949b012e74d7444'
+CYCLE_SOURCE_SHA256='087edbab9013606918340518ebeb4d12d837c8a2e86770672c5f475a578d8956'
+ARCHIVE_PATCH_SHA256='581ad6cd155cef8379e658eaafaa0a3924159c336cdaada1d13e7d5c8c338eec'
 
 
 def command(arguments,**kwargs):
@@ -29,6 +29,7 @@ def apply_task_archive_overlay(runtime,base_sha256):
     sources={
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
+        runtime/'scripts/extra_us_coverage_audit.py':'6d869367fb4cf3be88c55862c7f10fe6ee86e0935991fb3a0cc1b4fff6bae394',
         runtime/'src/backtest_data/remote/extra_cadence.py':'6eb2f5eb633546792c06b809aeb1d7b35e315809c20dcf296cc08a6183945346',
         runtime/'src/backtest_data/remote/extra_price_reconcile.py':'2e2e1715b0c970f5bcf246584bf3df8ea1f0c297dc40b50e73f88aeda06e48f7',
         runtime/'src/backtest_data/remote/extra_price_mapping.py':'d4046968591c1824f4ca14d79f69a82c2da197d4e6079ee180f9f67a8eaab4bc',
@@ -41,7 +42,7 @@ def apply_task_archive_overlay(runtime,base_sha256):
         runtime/'src/backtest_data/ingestion/supervisor.py':'9bd31d3288b85231cb8c07c0ab0210dba563986304b63cac1aa2bd680f6e4ae3',
     }
     for source in sources:
-        if source.name in {'extra_price_reconcile.py', 'extra_price_mapping.py'} and not source.exists():
+        if source.name in {'extra_price_reconcile.py', 'extra_price_mapping.py', 'extra_us_coverage_audit.py'} and not source.exists():
             continue
         canonical=source.read_text(encoding='utf-8')
         source.write_text(canonical,encoding='utf-8',newline='\n')
