@@ -2205,7 +2205,7 @@
 +            'applied': applied, 'reused_mapped_request': reused, 'held_existing_mapped_request': held_existing}
 --- /dev/null
 +++ b/scripts/extra_us_coverage_audit.py
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,466 @@
 +"""Read-only aggregate comparison of the frozen Extra cohort and public source evidence."""
 +
 +from collections import Counter, defaultdict
@@ -2557,8 +2557,11 @@
 +        old.append((tag, commit))
 +        tag,digest = _previous(commit)
 +    before, before_touched, scope = _coverage_from(old, core, windows, verified_listing, events)
-+    if scope['read_errors'] or scope['capped_assets']:
-+        raise ValueError('frozen baseline evidence incomplete')
++    # The prior 555 result was defined by this exact bound and asset order.
++    # Reproduce it even when the original bound skipped larger assets.
++    print(json.dumps({'status':'alpaca_followup_baseline_scope',**scope}),flush=True)
++    if scope['read_errors']:
++        raise ValueError('frozen baseline evidence could not be read')
 +    already, old_counts = _period_counts(windows, before)
 +    cohort = set(members) - already
 +    if (len(members),len(already),len(cohort)) != (968,555,413):

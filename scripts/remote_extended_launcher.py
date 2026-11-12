@@ -12,7 +12,7 @@ import zipfile
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='c286220e451c554e71203c9f9c088a88535f6cded84e2a777c1a723df06af78c'
 CYCLE_SOURCE_SHA256='087edbab9013606918340518ebeb4d12d837c8a2e86770672c5f475a578d8956'
-ARCHIVE_PATCH_SHA256='8f7da7adc36c9eecad7d4a9a4b9d56efe86a871b672a2759e23ab7bf520bed67'
+ARCHIVE_PATCH_SHA256='c10a4f2a18fdf0e1d0031056821328e481bbaff14046b8c4cc62e1dcf73136b0'
 
 
 def command(arguments,**kwargs):
@@ -29,7 +29,7 @@ def apply_task_archive_overlay(runtime,base_sha256):
     sources={
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
-        runtime/'scripts/extra_us_coverage_audit.py':'781e02f944a144a8e6def640e03e8248f50aa5b0e642933156b082b3478fc3a5',
+        runtime/'scripts/extra_us_coverage_audit.py':'9dc6f50d43a2ba1a1c0aeccd9e9ef45f8192b5c8802efbf083a8f119d4065e96',
         runtime/'src/backtest_data/remote/extra_cadence.py':'6eb2f5eb633546792c06b809aeb1d7b35e315809c20dcf296cc08a6183945346',
         runtime/'src/backtest_data/remote/extra_price_reconcile.py':'2e2e1715b0c970f5bcf246584bf3df8ea1f0c297dc40b50e73f88aeda06e48f7',
         runtime/'src/backtest_data/remote/extra_price_mapping.py':'d4046968591c1824f4ca14d79f69a82c2da197d4e6079ee180f9f67a8eaab4bc',
