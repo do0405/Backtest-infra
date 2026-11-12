@@ -202,3 +202,51 @@ def test_range_audit_preserves_any_trading_day_and_only_exact_aliases(reconcilia
     assert {row['id'] for row in tasks if row['status'] == 'superseded'} == {
         'weekend-range', 'holiday-range', 'same-alias',
     }
+
+
+def test_mapping_repair_requires_dated_identity_and_rechecks_new_request(reconciliation):
+    from backtest_data.remote.extra_price_mapping import audit_and_repair_us_mappings
+
+    def evidence(symbol, stamp='2026-11-05T15:00:00+00:00', exchange='NAS'):
+        return {'id': 'evidence-' + symbol + exchange, 'fields': {
+            'provider_symbol': symbol, 'exchange': exchange, 'market': 'US',
+            'master_realtime_symbol': exchange + symbol, 'realtime_symbol': 'D' + exchange + symbol,
+            'qualified_current_mapping': True, 'master_hash': 'a' * 64, 'master_raw_id': 'raw',
+            'master_captured_at': stamp,
+        }}
+
+    rows = []
+    members, observations = {}, {}
+    for symbol in ('GOOD', 'LATE', 'COLLIDE', 'MISSING', 'PROGRESS'):
+        row = task(symbol+'-old', 'US', 'pending', '2026-11-08', symbol=symbol,
+                   mapping_status='unsupported', provider_symbol=None, exchange=None,
+                   mapping_reason='restored_exact_master_mapping_unavailable')
+        row['attempts'] = 0
+        rows.append(row)
+        members[symbol] = {'symbol': symbol, 'identifier': 'directory:' + symbol, 'security_id': symbol, 'market': 'US'}
+        observations['directory:' + symbol] = [evidence(symbol)]
+    observations['directory:LATE'] = [evidence('LATE', '2026-11-09T15:00:00+00:00')]
+    observations['directory:COLLIDE'].append(evidence('COLLIDE', exchange='NYS'))
+    observations.pop('directory:MISSING')
+    rows[-1]['checkpoint']['source_rows_total'] = 2
+    archive = {'members': members, 'observations': observations}
+    ready = {'kis_overseas': date(2026, 11, 10)}
+    checkpoint = {'task_state': rows, 'unfinished_task_ids': [x['identity_hash'] for x in rows],
+                  'price_history_queue': {'kis_overseas': [x['id'] for x in rows]}}
+
+    summary = audit_and_repair_us_mappings(checkpoint, archive, ready_dates=ready, apply=True)
+
+    assert summary['applied'] == 1
+    assert summary['reasons'] == {'verified_catalog_route': 1, 'catalog_capture_after_window_start': 1,
+                                  'conflicting_catalog_routes': 1, 'no_archived_master_record': 1,
+                                  'prior_collection_evidence': 1}
+    replacement = checkpoint['task_state'][-1]
+    assert rows[0]['status'] == 'superseded' and rows[0]['request']['mapping_status'] == 'unsupported'
+    assert replacement['entity_id'] == 'GOOD' and replacement['request']['exchange'] == 'NAS'
+    assert replacement['identity_hash'] != rows[0]['identity_hash']
+    assert checkpoint['price_history_queue']['kis_overseas'][0] == replacement['id']
+    assert replacement['identity_hash'] in checkpoint['unfinished_task_ids']
+    assert audit_and_repair_us_mappings(checkpoint, archive, ready_dates=ready, apply=True)['applied'] == 0
+    result = reconciliation.reconcile_price_queue(checkpoint, ready_dates=ready, stored=set())
+    assert result['US']['pending']['removed_weekend'] == 1
+    assert replacement['status'] == 'superseded'
