@@ -6,6 +6,9 @@ on:
         description: Bounded extra acquisition with encrypted checkpoint publication margin
         required: false
         default: '4800'
+      audit_previous_sequence:
+        description: Published checkpoint sequence to audit read-only with its successor
+        required: false
   schedule:
     - cron: '37 0-22/2 * * *'
 permissions:
@@ -55,6 +58,7 @@ jobs:
           FSC_ISSUANCE_SERVICE_KEY: ${{ secrets.FSC_ISSUANCE_SERVICE_KEY }}
           FSC_RIGHTS_SERVICE_KEY: ${{ secrets.FSC_RIGHTS_SERVICE_KEY }}
           BUDGET_SECONDS: ${{ inputs.budget_seconds || '4800' }}
+          EXTRA_AUDIT_PREVIOUS_SEQUENCE: ${{ inputs.audit_previous_sequence || '' }}
         run: |
           umask 077
           python scripts/remote_extended_launcher.py

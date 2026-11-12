@@ -11,8 +11,8 @@ import zipfile
 
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='c286220e451c554e71203c9f9c088a88535f6cded84e2a777c1a723df06af78c'
-CYCLE_SOURCE_SHA256='babbda3b6c634c2a8286ff6b9bdc1a223408205229589db5f298fc02c01716ab'
-ARCHIVE_PATCH_SHA256='9484efbe5be61c124dd568bcfcdd351fb68f1bacdcda49d6a101efa77bf7808e'
+CYCLE_SOURCE_SHA256='59a4ded9f66041e5f988d12f5f245b81b68c5b0694d3a00801059be0f0997df4'
+ARCHIVE_PATCH_SHA256='46d4fd7d5c351cfaa9e83026875d2845e81338ef01b5cc9ec876428d2bf5c6a4'
 
 
 def command(arguments,**kwargs):
@@ -30,7 +30,7 @@ def apply_task_archive_overlay(runtime,base_sha256):
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
         runtime/'src/backtest_data/remote/extra_cadence.py':'6eb2f5eb633546792c06b809aeb1d7b35e315809c20dcf296cc08a6183945346',
-        runtime/'src/backtest_data/remote/extra_price_reconcile.py':'4910d33f981b81fd6ae1d5e7927200ae227149eb27387b127029673463a91129',
+        runtime/'src/backtest_data/remote/extra_price_reconcile.py':'b94ee3c4dc44d50d50dfba9a247004db623d95df73b71ea82d0e0ce6ad77e685',
         runtime/'src/backtest_data/remote/worker.py':'db0a7e1c815bb13a8267e4b6c524d4ca774ff506b615318857d8321061b0f985',
         runtime/'src/backtest_data/ingestion/jobs.py':'44c4a2eb149880c3271bc136c7f2c43d4622a26b9e0dfbee53cc528c40c6944a',
         runtime/'src/backtest_data/prices/storage.py':'a4cd5d85066646bdf7377ba3654193bd738391d8d47a737367754e20f3b9eece',
@@ -89,8 +89,11 @@ def main():
     command([sys.executable,'-m','pip','install','--no-deps','--no-build-isolation','-e',str(runtime)])
     command([sys.executable,'-m','pip','check'])
     command([sys.executable,'-m','alembic','upgrade','head'],cwd=runtime)
-    return subprocess.run([sys.executable,str(runtime/'scripts/remote_extended_cycle.py'),'--work',str(root/'capture'),
-        '--budget-seconds',os.environ.get('BUDGET_SECONDS','4800')],cwd=runtime,env=env).returncode
+    arguments = [sys.executable, str(runtime/'scripts/remote_extended_cycle.py'), '--work', str(root/'capture'),
+                 '--budget-seconds', os.environ.get('BUDGET_SECONDS', '4800')]
+    if audit_sequence := os.environ.get('EXTRA_AUDIT_PREVIOUS_SEQUENCE'):
+        arguments.extend(('--audit-previous-sequence', audit_sequence))
+    return subprocess.run(arguments,cwd=runtime,env=env).returncode
 
 
 if __name__=='__main__':

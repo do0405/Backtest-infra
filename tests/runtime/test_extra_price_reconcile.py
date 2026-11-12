@@ -167,3 +167,38 @@ def test_duplicate_cleanup_requires_a_viable_exact_survivor(reconciliation):
     assert result['US']['failed']['duplicate'] == 1
     assert attempted_failure['status'] == 'failed' and live['status'] == 'pending'
     assert result['US']['pending']['removed_duplicate'] == 1 and redundant['status'] == 'superseded'
+
+
+def test_range_audit_preserves_any_trading_day_and_only_exact_aliases(reconciliation):
+    weekly = {'cadence_lane': 'weekly_correction', 'refresh_policy': 'extra_weekly_correction_v6'}
+    legacy = {'cadence_lane': None, 'refresh_policy': 'catchup_and_rolling14_calendar_days_v1'}
+    weekend = task('weekend-range', 'KR', 'pending', '2026-10-18', output_start='2026-10-17', **legacy)
+    holiday = task('holiday-range', 'KR', 'retry', '2026-10-11', output_start='2026-10-09', **legacy)
+    trading = task('trading-range', 'KR', 'pending', '2026-10-11', output_start='2026-10-08', **legacy)
+    conflict = task('conflict-range', 'KR', 'retry', '2026-10-11', output_start='2026-10-09', **legacy)
+    range_options = dict(output_start='2026-11-14', correction_anchor='2026-11-27', **weekly)
+    first = task('same-first', 'US', 'retry', '2026-11-27', **range_options)
+    alias = task('same-alias', 'US', 'pending', '2026-11-27', **range_options)
+    alias['attempts'] = 0
+    other = task('same-other', 'US', 'pending', '2026-11-27', **{**range_options, 'output_start': '2026-11-15'})
+    other['attempts'] = 0
+    unknown_route = task('us-unknown', 'US', 'unsupported', '2026-11-27', mapping_status='unsupported')
+    too_recent = task('recent-day', 'US', 'pending', '2026-11-30')
+    tasks = [weekend, holiday, trading, conflict, first, alias, other, unknown_route, too_recent]
+    cutoff = dict.fromkeys(('kis', 'kis_overseas'), date(2026, 11, 30))
+
+    scope = reconciliation.prior_scope_counts(tasks, ready_dates=cutoff)
+    assert scope['KR']['multi_date_legacy_rolling'] == 4
+    assert scope['US']['multi_date_weekly_correction'] == 3
+    assert scope['US']['unqualified_route'] == scope['US']['not_past_ready_date'] == 1
+    stored = {('KR', 'conflict', date(2026, 10, 9), 'KRX', None)}
+    assert stored <= reconciliation.candidate_price_keys(tasks, cutoff)
+
+    result = reconciliation.reconcile_price_queue({'task_state': tasks}, ready_dates=cutoff, stored=stored)
+    assert result['KR']['pending']['removed_weekend'] == 1
+    assert result['KR']['retry']['removed_holiday'] == 1
+    assert result['KR']['retry']['conflicting_evidence'] == 1
+    assert result['US']['pending']['removed_duplicate'] == 1
+    assert {row['id'] for row in tasks if row['status'] == 'superseded'} == {
+        'weekend-range', 'holiday-range', 'same-alias',
+    }
