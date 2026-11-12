@@ -11,8 +11,8 @@ import zipfile
 
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='c286220e451c554e71203c9f9c088a88535f6cded84e2a777c1a723df06af78c'
-CYCLE_SOURCE_SHA256='e076d3f2b22522de51dd5c4494d5003065fb58fd7630deb7f9c0f7ca0a657255'
-ARCHIVE_PATCH_SHA256='498a4f5797bf5a53e6ec4718811ace9ecc4d1de3c114aaa1e9a88fd7a300a5cc'
+CYCLE_SOURCE_SHA256='babbda3b6c634c2a8286ff6b9bdc1a223408205229589db5f298fc02c01716ab'
+ARCHIVE_PATCH_SHA256='9484efbe5be61c124dd568bcfcdd351fb68f1bacdcda49d6a101efa77bf7808e'
 
 
 def command(arguments,**kwargs):
@@ -29,8 +29,8 @@ def apply_task_archive_overlay(runtime,base_sha256):
     sources={
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
-        runtime/'src/backtest_data/remote/extra_cadence.py':'e53cf904c0ae87d666456356df8473d5c7ed1d3f0e0655f465cac3b6bb294e33',
-        runtime/'src/backtest_data/remote/extra_price_reconcile.py':'c06aea9cb5bebcdb6cc6e6625a5a94933c8ad11e19312014c7675cd91632fded',
+        runtime/'src/backtest_data/remote/extra_cadence.py':'6eb2f5eb633546792c06b809aeb1d7b35e315809c20dcf296cc08a6183945346',
+        runtime/'src/backtest_data/remote/extra_price_reconcile.py':'4910d33f981b81fd6ae1d5e7927200ae227149eb27387b127029673463a91129',
         runtime/'src/backtest_data/remote/worker.py':'db0a7e1c815bb13a8267e4b6c524d4ca774ff506b615318857d8321061b0f985',
         runtime/'src/backtest_data/ingestion/jobs.py':'44c4a2eb149880c3271bc136c7f2c43d4622a26b9e0dfbee53cc528c40c6944a',
         runtime/'src/backtest_data/prices/storage.py':'a4cd5d85066646bdf7377ba3654193bd738391d8d47a737367754e20f3b9eece',

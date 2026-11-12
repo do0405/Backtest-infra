@@ -107,6 +107,63 @@ def test_missing_predecessor_price_evidence_leaves_open_day_pending(reconciliati
     checkpoint = {'task_state': [task('kr-open', 'KR', 'retry', '2026-11-12')]}
     result = reconciliation.reconcile_price_queue(
         checkpoint, ready_dates={'kis': date(2026, 11, 13)}, stored=set())
-    assert result['KR']['retry'] == dict(waiting=1, eligible=1, market_closed=0,
-                                         stored_daily_bar=0, conflicting_evidence=0)
+    counts = result['KR']['retry']
+    assert counts['unfinished'] == counts['eligible'] == 1
+    assert not any(value for field, value in counts.items() if field not in {'unfinished', 'eligible'})
     assert checkpoint['task_state'][0]['status'] == 'retry'
+
+
+def test_counts_and_cleans_only_proven_invalid_requests(reconciliation):
+    weekend = task('weekend-old', 'KR', 'retry', '2026-11-08', cadence_lane=None,
+                   refresh_policy='catchup_and_rolling14_calendar_days_v1')
+    holiday = task('holiday-old', 'KR', 'unsupported', '2026-10-09')
+    conflicting = task('conflict-old', 'US', 'retry', '2026-11-26')
+    conflicting['checkpoint']['normalized_rows_total'] = 1
+    current = task('current-old', 'KR', 'pending', '2026-12-01')
+    multi = task('multi-old', 'KR', 'retry', '2026-11-08', output_start='2026-11-06')
+    left = task('same-left', 'US', 'retry', '2026-11-27')
+    right = task('same-right', 'US', 'pending', '2026-11-27', cadence_lane='daily_latest',
+                 refresh_policy='extra_daily_latest_v6')
+    right['attempts'] = 0
+    progressed = task('keep-left', 'US', 'retry', '2026-11-27')
+    other_progress = task('keep-right', 'US', 'retry', '2026-11-27', cadence_lane='daily_latest',
+                          refresh_policy='extra_daily_latest_v6')
+    alternate_route = task('same-alt', 'US', 'retry', '2026-11-27', exchange='NYS')
+    tasks = [weekend, holiday, conflicting, current, multi, left, right, progressed, other_progress, alternate_route]
+    checkpoint = {'task_state': tasks, 'unfinished_task_ids': [x['identity_hash'] for x in tasks],
+                  'price_history_queue': {'kis': [weekend['id'], multi['id']],
+                                          'kis_overseas': [right['id'], left['id'], progressed['id']]}}
+    dates = dict.fromkeys(('kis', 'kis_overseas'), date(2026, 12, 1))
+
+    stats = reconciliation.reconcile_price_queue(checkpoint, ready_dates=dates, stored=set())
+
+    assert sum(counts['unfinished'] for market in stats.values() for counts in market.values()) == 10
+    assert stats['KR']['retry']['weekend'] == stats['KR']['retry']['removed_weekend'] == 1
+    assert stats['KR']['unsupported']['holiday'] == stats['KR']['unsupported']['removed_holiday'] == 1
+    assert stats['US']['retry']['holiday'] == stats['US']['retry']['conflicting_evidence'] == 1
+    assert stats['US']['retry']['removed_holiday'] == 0
+    assert stats['US']['pending']['duplicate'] == stats['US']['pending']['removed_duplicate'] == 1
+    assert stats['US']['retry']['duplicate'] == 1 and stats['US']['retry']['removed_duplicate'] == 0
+    assert {x['id'] for x in tasks if x['status'] == 'superseded'} == {'weekend-old', 'holiday-old', 'same-right'}
+    assert weekend['checkpoint']['reason'] == 'verified_exchange_closed'
+    assert checkpoint['price_history_queue'] == {'kis': [multi['id']], 'kis_overseas': [left['id'], progressed['id']]}
+    assert set(checkpoint['unfinished_task_ids']) == {x['identity_hash'] for x in tasks if x['status'] != 'superseded'}
+
+
+def test_duplicate_cleanup_requires_a_viable_exact_survivor(reconciliation):
+    same = {'cadence_lane': 'daily_latest', 'refresh_policy': 'extra_daily_latest_v6'}
+    attempted_failure = task('need-left', 'US', 'failed', '2026-11-27')
+    live = task('need-right', 'US', 'pending', '2026-11-27', **same)
+    live['attempts'] = 0
+    saved = task('saved-left', 'US', 'succeeded', '2026-11-27')
+    saved['checkpoint'] = {'normalized_rows_total': 1}
+    redundant = task('saved-right', 'US', 'pending', '2026-11-27', **same)
+    redundant['attempts'] = 0
+    checkpoint = {'task_state': [attempted_failure, live, saved, redundant]}
+
+    result = reconciliation.reconcile_price_queue(
+        checkpoint, ready_dates={'kis_overseas': date(2026, 11, 30)}, stored=set())
+
+    assert result['US']['failed']['duplicate'] == 1
+    assert attempted_failure['status'] == 'failed' and live['status'] == 'pending'
+    assert result['US']['pending']['removed_duplicate'] == 1 and redundant['status'] == 'superseded'
