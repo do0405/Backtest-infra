@@ -14,7 +14,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: encrypted-extra-source-forward-owner
+  group: extra-us-coverage-read-only
   cancel-in-progress: false
 jobs:
   refresh:
