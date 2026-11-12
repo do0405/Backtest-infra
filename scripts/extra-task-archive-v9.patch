@@ -492,7 +492,7 @@
      readiness=configuration.get('quota_partition_ready',{})
      allowance=None;fsc_allowance=None
      if readiness.get('alpha_vantage') is True and quota_ready(configuration,'alpha_vantage',utcnow()):
-@@ -127,13 +179,24 @@
+@@ -127,13 +179,28 @@
          checkpoint['raw_identity_archive']=archive.checkpoint_state()
          resolver=LazyWindowResolver(engine,gh=gh,repo=repo,stream=stream,bootstrap_hash=binding['sha256'],key=key,
              work=work/'lazy-resume',raw_root=raw)
@@ -503,9 +503,13 @@
 +            stored, evidence = predecessor_price_evidence(
 +                gh,repo,release,prior,work,key=key,candidates=candidates)
 +            counts = reconcile_price_queue(checkpoint,ready_dates=ready_dates,stored=stored)
++            totals = {field: sum(row[field] for market in counts.values() for row in market.values())
++                      for field in ('unfinished', 'eligible', 'weekend', 'holiday', 'duplicate',
++                                    'removed_weekend', 'removed_holiday', 'removed_duplicate',
++                                    'stored_daily_bar', 'conflicting_evidence')}
 +            print(json.dumps({'status':'extra_price_queue_reconciled',
 +                'previous_sequence':prior['end_sequence'],'previous_tag':prior_tag,
-+                'stored_evidence':evidence,'by_market':counts}),flush=True)
++                'stored_evidence':evidence,'totals':totals,'by_market':counts}),flush=True)
          with raw_identity_registration(archive):
 -            result=run_cycle(engine,raw,ownership=configuration,planned_jobs=partial(forward_jobs,engine,configuration,as_of=utcnow()),
 +            result=run_cycle(engine,raw,ownership=configuration,planned_jobs=partial(forward_jobs,engine,configuration,as_of=cycle_as_of),
@@ -519,7 +523,7 @@
          head=result['head'];state=unpack(read_manifest(store/'bundles'/head['bundle_id'])['checkpoint'])
          state.update(handoff_id=configuration['handoff_id'],forward_start=configuration['forward_start'])
          tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
-@@ -143,8 +206,14 @@
+@@ -143,8 +210,14 @@
              scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
              resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
              state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
@@ -535,7 +539,7 @@
          # Initial bootstrap did not occupy the state path; all files use fresh
          # names in this generation even when a predecessor was restored.
          zip_store(resumed,work/'next-resume.zip')
-@@ -164,7 +233,7 @@
+@@ -164,7 +237,7 @@
              'created_at':utcnow().isoformat(),'coverage_complete':False}
          commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
          read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
@@ -546,7 +550,7 @@
              target='main',control_target=True,title='Encrypted extra-source checkpoint '+str(head['sequence']),
 --- a/src/backtest_data/remote/extra_cadence.py
 +++ b/src/backtest_data/remote/extra_cadence.py
-@@ -1,20 +1,37 @@
+@@ -1,20 +1,38 @@
  """Fresh Extra price/official plans; immutable old requests remain untouched."""
 +from collections import Counter
  from copy import deepcopy
@@ -554,17 +558,18 @@
  from zoneinfo import ZoneInfo
  import time
  from ..collection.cadence import provider_ready_date
-+from ..ingestion.jobs import MAX_HISTORY_JOB_IDS, logical_request, stable_hash
++from ..ingestion.jobs import MAX_HISTORY_JOB_IDS
 +from ..prices.adapters.kis_overseas import overseas_daily_ready_date
  from ..remote_updates import build_update_jobs
 -
 -
 -def history_rotation(tasks,previous,*,source,as_of,limit=128):
-+from .extra_price_reconcile import MARKET_BY_SOURCE, market_closed
++from .extra_price_reconcile import DAILY_LANES, MARKET_BY_SOURCE, market_closed
++from .extra_price_reconcile import daily_request_identity as _daily_identity
++from .extra_price_reconcile import unstarted as _unstarted
 +
 +
 +MAX_DAILY_JOBS_PER_LANE = 17_758
-+DAILY_LANES = {'daily_latest', 'daily_catchup'}
 +LIVE_STATUSES = {'pending', 'retry', 'running'}
 +
 +
@@ -591,7 +596,7 @@
      def due(task):
          retry=task.get('checkpoint',{}).get('retry_after')
          if retry is None:return True
-@@ -24,13 +41,15 @@
+@@ -24,13 +42,15 @@
      eligible={identity for identity,task in retained.items() if due(task)}
      queue=[identity for identity in previous if identity in retained]
      if not any(identity in eligible for identity in queue):
@@ -609,7 +614,7 @@
      return [identity for identity in queue if identity not in served]
  
  
-@@ -38,23 +57,58 @@
+@@ -38,23 +58,58 @@
      return [('latest',seconds*3/5),('history',seconds/4),('correction',seconds*3/20)]
  
  
@@ -679,7 +684,7 @@
          for task in checkpoint.get('task_state',[]):
              if task['source']!=source or task['domain']!='prices' or task['entity_id'] not in expected:continue
              request=task['request'];start=date.fromisoformat(request['output_start']);end=date.fromisoformat(request['output_end'])
-@@ -71,14 +125,15 @@
+@@ -71,14 +126,15 @@
              for (start,end),entry in groups.items():
                  if start<=day<=end:found.update(entry[axis])
              return bool(expected) and found==expected
@@ -699,21 +704,10 @@
          result[source]={'expected_entities':len(expected),'request_completed_through':cutoff.isoformat(),
              'first_unadmitted_date':missing.isoformat(),'unsupported_entities':len(unsupported),
              'numeric_observed_entities':len(numeric),'valid_empty_entities':len(empty),
-@@ -86,24 +141,191 @@
+@@ -86,24 +142,176 @@
      return result
  
  
-+def _daily_identity(job):
-+    request = logical_request(job['request'])
-+    lane = request.get('cadence_lane')
-+    # These two policies differ only in scheduling. All provider request fields
-+    # and other policies still participate in identity.
-+    if lane in DAILY_LANES and request.get('refresh_policy') == f'extra_{lane}_v6':
-+        request.pop('cadence_lane')
-+        request.pop('refresh_policy')
-+    return stable_hash([job['source'], job['domain'], job['entity_id'], request])
-+
-+
 +def _managed_daily(task):
 +    request = task['request']
 +    lane = request.get('cadence_lane')
@@ -721,10 +715,6 @@
 +            and lane in DAILY_LANES and request.get('refresh_policy') == f'extra_{lane}_v6'
 +            and isinstance(request.get('output_end'), str)
 +            and request.get('output_start') == request['output_end'])
-+
-+
-+def _unstarted(task):
-+    return task['status'] == 'pending' and task.get('attempts') == 0 and not task.get('checkpoint')
 +
 +
 +def clean_legacy_daily_queue(checkpoint, *, as_of):
@@ -1600,14 +1590,19 @@
              "response_valid": response_valid, "pagination_valid": pagination_valid,
 --- /dev/null
 +++ b/src/backtest_data/remote/extra_price_reconcile.py
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,210 @@
 +"""Conservative reconciliation for owned one-session KIS collection tasks."""
 +
++from collections import defaultdict
 +from datetime import date
++
++from ..ingestion.jobs import logical_request, stable_hash
 +
 +
 +MARKET_BY_SOURCE = {'kis': 'KR', 'kis_overseas': 'US'}
 +WAITING = ('pending', 'retry')
++UNFINISHED = (*WAITING, 'failed', 'unsupported')
++DAILY_LANES = {'daily_latest', 'daily_catchup'}
 +US_VENUES = {'NAS', 'NYS', 'AMS'}
 +# Positive full-day closure evidence for the 2026 forward window. Dates
 +# outside these lists are never presumed closed merely for lack of a row.
@@ -1625,15 +1620,30 @@
 +    return day.weekday() >= 5 or day in CONFIRMED_HOLIDAYS[market]
 +
 +
-+def _request_key(task):
++def daily_request_identity(task):
++    request = logical_request(task['request'])
++    lane = request.get('cadence_lane')
++    # Latest and catch-up change scheduling only. Keep all provider fields.
++    if lane in DAILY_LANES and request.get('refresh_policy') == f'extra_{lane}_v6':
++        del request['cadence_lane'], request['refresh_policy']
++    return stable_hash([task['source'], task['domain'], task['entity_id'], request])
++
++
++def unstarted(task):
++    return task['status'] == 'pending' and task.get('attempts') == 0 and not task['checkpoint']
++
++
++def _request_key(task, *, include_legacy=False):
 +    source = task['source']
 +    request = task['request']
 +    market = MARKET_BY_SOURCE.get(source)
 +    lane = request.get('cadence_lane')
 +    day = request.get('output_end')
++    policy = request.get('refresh_policy')
++    managed = lane in DAILY_LANES and policy == f'extra_{lane}_v6'
++    legacy = include_legacy and lane is None and policy == 'catchup_and_rolling14_calendar_days_v1'
 +    if (market is None or task['domain'] != 'prices' or request.get('market') != market
-+            or lane not in ('daily_latest', 'daily_catchup')
-+            or request.get('refresh_policy') != f'extra_{lane}_v6'
++            or not (managed or legacy)
 +            or not isinstance(day, str) or request.get('output_start') != day):
 +        return None
 +    try:
@@ -1651,7 +1661,12 @@
 +def candidate_price_keys(tasks, ready_dates):
 +    keys = set()
 +    for task in tasks:
-+        if task['status'] in WAITING and (key := _request_key(task)) and key[2] < ready_dates[task['source']]:
++        if task['status'] not in UNFINISHED:
++            continue
++        key = _request_key(task, include_legacy=True)
++        if (key and key[2] < ready_dates[task['source']]
++                and (market_closed(key[0], key[2])
++                     or (task['status'] in WAITING and task['request'].get('cadence_lane') in DAILY_LANES))):
 +            keys.add(key)
 +    return keys
 +
@@ -1693,40 +1708,89 @@
 +    return proven
 +
 +
++def _closure_conflicts(evidence):
++    return any(evidence.get(field) for field in (
++        'normalized_rows_total', 'source_rows_total', 'source_row_count', 'inserted',
++        'rejected', 'rejected_total', 'next_page_token', 'cursor_end', 'last_completed_page',
++        'last_completed_date',
++    ))
++
++
++def _duplicate_priority(task):
++    return (task['status'] != 'succeeded', task['status'] not in WAITING, unstarted(task),
++            task['request'].get('cadence_lane') != 'daily_latest', str(task['id']))
++
++
 +def reconcile_price_queue(checkpoint, *, ready_dates, stored):
-+    """Mark only positively proved requests terminal, before the planner runs."""
-+    stats = {market: {status: dict(waiting=0, eligible=0, market_closed=0, stored_daily_bar=0, conflicting_evidence=0)
-+                      for status in WAITING} for market in MARKET_BY_SOURCE.values()}
++    """Audit the restored queue and supersede only proven non-work."""
++    fields = ('unfinished', 'eligible', 'weekend', 'holiday', 'duplicate',
++              'removed_weekend', 'removed_holiday', 'removed_duplicate', 'market_closed',
++              'stored_daily_bar', 'conflicting_evidence')
++    stats = {market: {status: dict.fromkeys(fields, 0) for status in UNFINISHED}
++             for market in MARKET_BY_SOURCE.values()}
 +    completed, cleaned, job_ids = set(), set(), set()
-+    for task in checkpoint.get('task_state', ()):
-+        source, status = task['source'], task['status']
-+        if source not in MARKET_BY_SOURCE or status not in WAITING:
-+            continue
-+        counts = stats[MARKET_BY_SOURCE[source]][status]
-+        counts['waiting'] += 1
-+        key = _request_key(task)
-+        if key is None or key[2] >= ready_dates[source]:
-+            continue
-+        counts['eligible'] += 1
-+        closed = market_closed(key[0], key[2])
-+        found = key in stored
-+        if closed and found:
-+            counts['conflicting_evidence'] += 1
-+            continue
-+        if closed:
-+            task['status'] = 'superseded'
-+            task['checkpoint'] = {'reason': 'verified_exchange_closed'}
-+            counts['market_closed'] += 1
-+        elif found:
-+            task['status'] = 'succeeded'
-+            task['checkpoint'] = {'reason': 'verified_published_daily_bar', 'normalized_rows_total': 1,
-+                                  'source_rows_total': 1, 'response_valid': True, 'pagination_valid': True}
-+            completed.add(task['identity_hash'])
-+            counts['stored_daily_bar'] += 1
-+        else:
-+            continue
++    aliases = defaultdict(list)
++    verified_bars = []
++
++    def record(task, status, reason, **evidence):
++        task['status'] = status
++        task['checkpoint'] = {**task['checkpoint'], **evidence, 'reason': reason}
 +        cleaned.add(task['identity_hash'])
 +        job_ids.add(task['id'])
++
++    for task in checkpoint.get('task_state', ()):
++        source, status = task['source'], task['status']
++        if source not in MARKET_BY_SOURCE:
++            continue
++        counts = stats[MARKET_BY_SOURCE[source]].get(status)
++        if counts is not None:
++            counts['unfinished'] += 1
++        elif status != 'succeeded' or not task['checkpoint'].get('normalized_rows_total'):
++            continue
++        key = _request_key(task, include_legacy=True)
++        if key is None or key[2] >= ready_dates[source]:
++            continue
++        if counts is None:
++            if not market_closed(key[0], key[2]):
++                aliases[daily_request_identity(task)].append(task)
++            continue
++        counts['eligible'] += 1
++        if market_closed(key[0], key[2]):
++            category = 'weekend' if key[2].weekday() >= 5 else 'holiday'
++            counts[category] += 1
++            if key in stored or _closure_conflicts(task['checkpoint']):
++                counts['conflicting_evidence'] += 1
++                continue
++            record(task, 'superseded', 'verified_exchange_closed')
++            counts[f'removed_{category}'] += 1
++            counts['market_closed'] += 1
++            continue
++        aliases[daily_request_identity(task)].append(task)
++        if key in stored and status in WAITING and task['request'].get('cadence_lane') in DAILY_LANES:
++            verified_bars.append((task, counts))
++
++    for group in aliases.values():
++        if len(group) < 2:
++            continue
++        survivor, *redundant = sorted(group, key=_duplicate_priority)
++        for task in redundant:
++            counts = stats[MARKET_BY_SOURCE[task['source']]].get(task['status'])
++            if counts is None:
++                continue
++            counts['duplicate'] += 1
++            if survivor['status'] in (*WAITING, 'succeeded') and unstarted(task):
++                record(task, 'superseded', 'exact_daily_request_alias')
++                counts['removed_duplicate'] += 1
++
++    for task, counts in verified_bars:
++        if task['status'] in WAITING:
++            record(task, 'succeeded', 'verified_published_daily_bar',
++                   normalized_rows_total=max(1, task['checkpoint'].get('normalized_rows_total') or 0),
++                   source_rows_total=max(1, task['checkpoint'].get('source_rows_total') or 0),
++                   response_valid=True, pagination_valid=True)
++            completed.add(task['identity_hash'])
++            counts['stored_daily_bar'] += 1
++
 +    if completed:
 +        checkpoint['completed_task_ids'] = sorted(set(checkpoint.get('completed_task_ids', ())) | completed)
 +    if cleaned and 'unfinished_task_ids' in checkpoint:
