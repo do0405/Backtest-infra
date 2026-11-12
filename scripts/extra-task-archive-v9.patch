@@ -2205,7 +2205,7 @@
 +            'applied': applied, 'reused_mapped_request': reused, 'held_existing_mapped_request': held_existing}
 --- /dev/null
 +++ b/scripts/extra_us_coverage_audit.py
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,463 @@
 +"""Read-only aggregate comparison of the frozen Extra cohort and public source evidence."""
 +
 +from collections import Counter, defaultdict
@@ -2380,51 +2380,42 @@
 +    return results
 +
 +
-+def existing_alpaca_coverage(manifest_id, members, windows, verified_listing, events):
-+    index = json.loads(read(INDEX, 256*1024))
-+    raw = read(ROOT+'offline-core-catalog-v1-20261012/catalog.json', 32*1024**2)
-+    if sha256(raw).hexdigest() != index['catalog_sha256']:
-+        raise ValueError('Core catalog hash mismatch')
-+    catalog = json.loads(raw)
-+    if catalog['manifest_id'] != manifest_id:
-+        raise ValueError('Extra and Core original target mismatch')
-+    core = {}
-+    for row in catalog['us_prices']:
-+        identity, source = row['entity_id'], row.get('source_member')
-+        member = members.get(identity)
-+        if (member and source and source['security_id'] == identity and source['identifier'] == member['identifier']
-+                and source['symbol'] == member['symbol'] and source['venue'] == member['venue']
-+                and row['symbol'] in {member['symbol'], directory_cqs_symbol(source)}):
-+            core[identity] = row
++CORE_BASE_TAG = 'offline-core-forward-v1-000000148'
++CORE_BASE_DIGEST = '286bc0027766e351de6856c3130be568fc2715c63896ec477ad5b29099055705'
 +
-+    candidates = []
-+    tag, digest = index['tag'], index['commit_sha256']
-+    retry_entities = unsupported_entities = 0
-+    for _ in range(14):
-+        if not tag:
-+            break
-+        raw = read(ROOT+tag+'/commit.json', 8*1024**2)
-+        if sha256(raw).hexdigest() != digest:
-+            raise ValueError('Core published manifest lineage mismatch')
-+        commit = json.loads(raw)
-+        if commit['catalog_sha256'] != index['catalog_sha256']:
-+            raise ValueError('Core capture catalog binding mismatch')
-+        if tag == index['tag']:
-+            record = commit['files']['state.json.gz']
-+            state_bytes = read(ROOT+tag+'/state.json.gz', record['bytes'])
-+            if sha256(state_bytes).hexdigest() != record['sha256']:
-+                raise ValueError('Core published queue hash mismatch')
-+            state = json.loads(decompress(state_bytes))['sources']['alpaca']
-+            retry_entities = len(core.keys() & state.get('price_gaps', {}).keys())
-+            unsupported = state.get('unsupported_symbols', {})
-+            if isinstance(unsupported, dict):
-+                symbols = {row['symbol'] for row in core.values()}
-+                unsupported_entities = len(symbols & unsupported.keys())
++
++def _core_manifest(tag, digest, catalog_hash):
++    if not re.fullmatch(r'offline-core-forward-v1-[0-9]{9}', tag):
++        raise ValueError('invalid Core release binding')
++    raw = read(ROOT+tag+'/commit.json', 8*1024**2)
++    if sha256(raw).hexdigest() != digest:
++        raise ValueError('Core published manifest lineage mismatch')
++    commit = json.loads(raw)
++    if commit['catalog_sha256'] != catalog_hash:
++        raise ValueError('Core capture catalog binding mismatch')
++    return commit
++
++
++def _core_state(tag, commit):
++    record = commit['files']['state.json.gz']
++    state_bytes = read(ROOT+tag+'/state.json.gz', record['bytes'])
++    if len(state_bytes) != record['bytes'] or sha256(state_bytes).hexdigest() != record['sha256']:
++        raise ValueError('Core published queue hash mismatch')
++    return json.loads(decompress(state_bytes))
++
++
++def _previous(commit):
++    return commit['previous_tag'], commit['previous_commit_sha256']
++
++
++def _coverage_from(releases, core, windows, eligible, events):
++    candidates, touched = [], set()
++    for tag, commit in releases:
 +        groups = defaultdict(list)
 +        for item in commit['captures']:
 +            capture = item['capture']
 +            identity = capture['entity_id']
-+            if capture['source'] != 'alpaca' or identity not in core or identity not in verified_listing:
++            if capture['source'] != 'alpaca' or identity not in core or identity not in eligible:
 +                continue
 +            metadata = capture['metadata']
 +            row = core[identity]
@@ -2434,19 +2425,19 @@
 +            low, high = (date.fromisoformat(metadata[field]) for field in ('start', 'end'))
 +            if identity in events:
 +                high = min(high, events[identity][2])
-+            if any(start <= high and low <= end for start, end, _ in windows[identity]):
++            if low <= high and any(start <= high and low <= end for start, end, _ in windows[identity]):
++                touched.add(identity)
 +                groups[item['asset']].append((identity, row['symbol'], low, high, capture['content_sha256']))
 +        for asset, rows in groups.items():
 +            candidates.append((tag, asset, commit['files'][asset], rows))
-+        tag, digest = commit['previous_tag'], commit['previous_commit_sha256']
-+
 +    verified = defaultdict(set)
-+    tags, errors = [], 0
++    tags, errors, capped = [], 0, 0
 +    remaining = 768*1024**2
 +    candidates.sort(key=lambda item: (-len({row[0] for row in item[3]}), item[0], item[1]))
 +    for tag, asset, record, rows in candidates:
 +        size = record['bytes']
 +        if size > remaining:
++            capped += 1
 +            continue
 +        remaining -= size
 +        try:
@@ -2467,28 +2458,149 @@
 +            tags.append(tag)
 +        except (OSError, ValueError, KeyError, BadZipFile):
 +            errors += 1
++    return verified, touched, {'release_count':len(releases), 'read_count':len(tags),
++                               'read_errors':errors,'capped_assets':capped}
 +
-+    complete, partial, any_rows, full_rows, observed_dates = 0, 0, set(), set(), set()
++
++def _period_counts(windows, verified):
++    complete, partial, any_rows, observed = 0, 0, set(), set()
++    date_windows = {}
 +    for identity, ranges in windows.items():
-+        bars = verified[identity]
++        if not (bars := verified.get(identity)):
++            continue
 +        for start, end, count in ranges:
-+            days = {date.fromordinal(n) for n in range(start.toordinal(), end.toordinal()+1)
++            if (start, end) not in date_windows:
++                date_windows[start, end] = {date.fromordinal(n) for n in range(start.toordinal(), end.toordinal()+1)
 +                    if not market_closed('US', date.fromordinal(n))}
++            days = date_windows[start, end]
 +            if hits := (bars & days):
 +                any_rows.add(identity)
-+                observed_dates.update(hits)
++                observed.update(hits)
 +                if hits == days:
-+                    full_rows.add(identity)
 +                    complete += count
 +                else:
 +                    partial += count
-+    return {'already_in_core_catalog':len(core), 'core_watermark':index['source_watermarks'].get('alpaca'),
-+            'core_retry_securities':retry_entities, 'core_unsupported_symbol_count':unsupported_entities,
-+            'core_captures_verified':sorted(set(tags)), 'core_asset_read_errors':errors,
-+            'securities_with_any_period_bar':len(any_rows), 'securities_with_complete_request':len(full_rows),
-+            'requests_with_all_market_days_verified':complete, 'requests_with_some_market_days_verified':partial,
-+            'observed_start':min(observed_dates).isoformat() if observed_dates else None,
-+            'observed_end':max(observed_dates).isoformat() if observed_dates else None}
++    return any_rows, {'securities_with_any_period_bar':len(any_rows),'complete_requests':complete,
++                      'partial_requests':partial, 'observed_start':min(observed).isoformat() if observed else None,
++                      'observed_end':max(observed).isoformat() if observed else None}
++
++
++def _source_causes(state, identities, windows, core, eligible, positions, touched):
++    counts, attempts, source_gaps = Counter(), [], 0
++    for identity in identities:
++        if identity not in eligible:
++            counts['identity_unconfirmed'] += 1
++            continue
++        member = core.get(identity)
++        if not member:
++            counts['outside_core_catalog'] += 1
++            continue
++        def overlaps(record):
++            return bool(record and 'start' in record and 'end' in record
++                        and any(start <= date.fromisoformat(record['end']) and date.fromisoformat(record['start']) <= end
++                                for start, end, _ in windows[identity]))
++        exclusion = state.get('unsupported_symbols', {}).get(identity)
++        gap = state.get('price_gaps', {}).get(identity)
++        pending = ([row for row in gap.get('ranges', []) if overlaps(row)]
++                   if gap and gap['symbol'] == member['symbol'] else [])
++        if pending:
++            source_gaps += 1
++            attempts.extend(row.get('attempts',0) for row in pending)
++        if exclusion and exclusion['symbol'] == member['symbol'] and overlaps(exclusion):
++            counts['supplier_rejected_symbol'] += 1
++        elif pending:
++            reason = gap.get('reason')
++            counts[reason if reason in {'supplier_empty_window','supplier_response_symbol_mismatch',
++                                        'supplier_invalid_symbol'} else 'other_recorded_gap'] += 1
++        elif any(overlaps(cycle) and positions[identity] >= cycle['offset']
++                 for key in ('recent_cycle','cycle') if (cycle:=state.get(key))):
++            counts['awaiting_traversal_in_intersecting_cycle'] += 1
++        elif identity in touched:
++            counts['published_response_no_verified_requested_day'] += 1
++        else:
++            counts['no_overlapping_published_response_or_pending_gap'] += 1
++    return {'reasons':dict(counts),'overlapping_retry_symbols':source_gaps,
++            'retry_attempts_min':min(attempts) if attempts else None,'retry_attempts_max':max(attempts) if attempts else None}
++
++
++def existing_alpaca_coverage(manifest_id, members, windows, verified_listing, events):
++    index = json.loads(read(INDEX, 256*1024))
++    raw = read(ROOT+'offline-core-catalog-v1-20261012/catalog.json', 32*1024**2)
++    catalog_hash = index['catalog_sha256']
++    if sha256(raw).hexdigest() != catalog_hash:
++        raise ValueError('Core catalog hash mismatch')
++    catalog = json.loads(raw)
++    if catalog['manifest_id'] != manifest_id:
++        raise ValueError('Extra and Core original target mismatch')
++    core, positions = {}, {}
++    for pos, row in enumerate(catalog['us_prices']):
++        identity, source = row['entity_id'], row.get('source_member')
++        member = members.get(identity)
++        if (member and source and source['security_id'] == identity and source['identifier'] == member['identifier']
++                and source['symbol'] == member['symbol'] and source['venue'] == member['venue']
++                and row['symbol'] in {member['symbol'], directory_cqs_symbol(source)}):
++            core[identity], positions[identity] = row, pos
++
++    tag, digest = index['tag'], index['commit_sha256']
++    newer = []
++    while tag != CORE_BASE_TAG:
++        if not tag or len(newer) >= 12:
++            raise ValueError('newer Core release bound exceeded')
++        commit = _core_manifest(tag, digest, catalog_hash)
++        newer.append((tag, commit))
++        tag,digest = _previous(commit)
++    if digest != CORE_BASE_DIGEST:
++        raise ValueError('frozen 148 digest mismatch')
++    old = []
++    for _ in range(14):
++        commit = _core_manifest(tag, digest, catalog_hash)
++        old.append((tag, commit))
++        tag,digest = _previous(commit)
++    before, before_touched, scope = _coverage_from(old, core, windows, verified_listing, events)
++    if scope['read_errors'] or scope['capped_assets']:
++        raise ValueError('frozen baseline evidence incomplete')
++    already, old_counts = _period_counts(windows, before)
++    cohort = set(members) - already
++    if (len(members),len(already),len(cohort)) != (968,555,413):
++        print(json.dumps({'status':'alpaca_followup_baseline_mismatch','cohort_size':len(members),
++                          'baseline_verified':len(already),'unverified':len(cohort)}),flush=True)
++        raise ValueError('exact frozen 413 cohort could not be reproduced')
++    focus = {identity:windows[identity] for identity in cohort}
++    eligible = verified_listing & cohort
++    base_state = _core_state(*old[0])
++    newest_state = _core_state(*newer[0]) if newer else base_state
++    print(json.dumps({'status':'alpaca_followup_baseline','tag':CORE_BASE_TAG,'cohort':len(cohort),
++                      **_source_causes(base_state['sources']['alpaca'],cohort,focus,core,eligible,positions,before_touched)}),flush=True)
++
++    # The original audit used a fourteen-release window. Look separately at
++    # older public evidence and at releases published after that audit.
++    earlier = []
++    for _ in range(26):
++        if not tag:
++            break
++        commit = _core_manifest(tag, digest, catalog_hash)
++        earlier.append((tag, commit))
++        tag,digest = _previous(commit)
++    fresh, fresh_touched, new_scope = _coverage_from(newer,core,focus,eligible,events)
++    deeper, deeper_touched, deep_scope = _coverage_from(earlier,core,focus,eligible,events)
++    fresh_ids,fresh_counts = _period_counts(focus,fresh)
++    earlier_ids,earlier_counts = _period_counts(focus,deeper)
++    union = {identity:fresh.get(identity,set()) | deeper.get(identity,set()) for identity in cohort}
++    found, found_counts = _period_counts(focus,union)
++    still = cohort-found
++    latest = newest_state['sources']['alpaca']
++    progress = {key:{field:latest[key][field] for field in ('start','end','offset') if field in latest[key]}
++                for key in ('recent_cycle','cycle') if latest.get(key)}
++    provider = newest_state.get('provider_status',{}).get('alpaca',{}).get('status')
++    return {'tag':index['tag'],'watermark':latest['watermark'],'provider_status':provider,'cycle_progress':progress,
++            'catalog_members':len(core),'older_archive':{**earlier_counts,**deep_scope,
++              'earliest_scanned':earlier[-1][0] if earlier else None},
++            'newly_published':{**fresh_counts,**new_scope,
++              'first_evidence_not_in_older_archive':len(fresh_ids-earlier_ids),
++              'tags':[tag for tag,_ in newer]},
++            'total_additional':found_counts,'remaining':len(still),
++            'remaining_cause':_source_causes(latest,still,focus,core,eligible,positions,
++                                            before_touched | fresh_touched | deeper_touched)}
 +
 +
 +def audit_us_coverage(gh, repo, releases, configuration, catalog, work, *, key, restore_task_state):
@@ -2556,4 +2668,4 @@
 +    verified_listing = {identity for identity, reason in classes.items()
 +                        if reason.startswith(('listed_', 'official_'))}
 +    coverage = existing_alpaca_coverage(configuration['manifest_id'], members, windows, verified_listing, events)
-+    print(json.dumps({'status':'us_coverage_alpaca_audit', **coverage}), flush=True)
++    print(json.dumps({'status':'alpaca_followup_result', **coverage}), flush=True)
