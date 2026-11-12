@@ -2205,7 +2205,7 @@
 +            'applied': applied, 'reused_mapped_request': reused, 'held_existing_mapped_request': held_existing}
 --- /dev/null
 +++ b/scripts/extra_us_coverage_audit.py
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,475 @@
 +"""Read-only aggregate comparison of the frozen Extra cohort and public source evidence."""
 +
 +from collections import Counter, defaultdict
@@ -2408,11 +2408,13 @@
 +    return commit['previous_tag'], commit['previous_commit_sha256']
 +
 +
-+def _coverage_from(releases, core, windows, eligible, events):
++def _coverage_from(releases, core, windows, eligible, events, *, only_assets=None, baseline=False):
 +    candidates, touched = [], set()
 +    for tag, commit in releases:
 +        groups = defaultdict(list)
 +        for item in commit['captures']:
++            if only_assets is not None and (tag,item['asset']) not in only_assets:
++                continue
 +            capture = item['capture']
 +            identity = capture['entity_id']
 +            if capture['source'] != 'alpaca' or identity not in core or identity not in eligible:
@@ -2425,19 +2427,19 @@
 +            low, high = (date.fromisoformat(metadata[field]) for field in ('start', 'end'))
 +            if identity in events:
 +                high = min(high, events[identity][2])
-+            if low <= high and any(start <= high and low <= end for start, end, _ in windows[identity]):
++            if (baseline or low <= high) and any(start <= high and low <= end for start, end, _ in windows[identity]):
 +                touched.add(identity)
 +                groups[item['asset']].append((identity, row['symbol'], low, high, capture['content_sha256']))
 +        for asset, rows in groups.items():
 +            candidates.append((tag, asset, commit['files'][asset], rows))
 +    verified = defaultdict(set)
-+    tags, errors, capped = [], 0, 0
++    tags, errors, skipped = [], 0, set()
 +    remaining = 768*1024**2
 +    candidates.sort(key=lambda item: (-len({row[0] for row in item[3]}), item[0], item[1]))
 +    for tag, asset, record, rows in candidates:
 +        size = record['bytes']
 +        if size > remaining:
-+            capped += 1
++            skipped.add((tag,asset))
 +            continue
 +        remaining -= size
 +        try:
@@ -2459,7 +2461,7 @@
 +        except (OSError, ValueError, KeyError, BadZipFile):
 +            errors += 1
 +    return verified, touched, {'release_count':len(releases), 'read_count':len(tags),
-+                               'read_errors':errors,'capped_assets':capped}
++                               'read_errors':errors,'capped_assets':len(skipped)}, skipped
 +
 +
 +def _period_counts(windows, verified):
@@ -2556,7 +2558,7 @@
 +        commit = _core_manifest(tag, digest, catalog_hash)
 +        old.append((tag, commit))
 +        tag,digest = _previous(commit)
-+    before, before_touched, scope = _coverage_from(old, core, windows, verified_listing, events)
++    before, before_touched, scope, skipped = _coverage_from(old, core, windows, verified_listing, events, baseline=True)
 +    # The prior 555 result was defined by this exact bound and asset order.
 +    # Reproduce it even when the original bound skipped larger assets.
 +    print(json.dumps({'status':'alpaca_followup_baseline_scope',**scope}),flush=True)
@@ -2584,11 +2586,15 @@
 +        commit = _core_manifest(tag, digest, catalog_hash)
 +        earlier.append((tag, commit))
 +        tag,digest = _previous(commit)
-+    fresh, fresh_touched, new_scope = _coverage_from(newer,core,focus,eligible,events)
-+    deeper, deeper_touched, deep_scope = _coverage_from(earlier,core,focus,eligible,events)
++    fresh, fresh_touched, new_scope, _ = _coverage_from(newer,core,focus,eligible,events)
++    deeper, deeper_touched, deep_scope, _ = _coverage_from(earlier,core,focus,eligible,events)
++    missed, missed_touched, missed_scope, _ = _coverage_from(old,core,focus,eligible,events,only_assets=skipped)
 +    fresh_ids,fresh_counts = _period_counts(focus,fresh)
-+    earlier_ids,earlier_counts = _period_counts(focus,deeper)
-+    union = {identity:fresh.get(identity,set()) | deeper.get(identity,set()) for identity in cohort}
++    _,earlier_counts = _period_counts(focus,deeper)
++    _,missed_counts = _period_counts(focus,missed)
++    preexisting = {identity:deeper.get(identity,set()) | missed.get(identity,set()) for identity in cohort}
++    preexisting_ids,preexisting_counts = _period_counts(focus,preexisting)
++    union = {identity:fresh.get(identity,set()) | preexisting[identity] for identity in cohort}
 +    found, found_counts = _period_counts(focus,union)
 +    still = cohort-found
 +    latest = newest_state['sources']['alpaca']
@@ -2599,11 +2605,14 @@
 +            'catalog_members':len(core),'older_archive':{**earlier_counts,**deep_scope,
 +              'earliest_scanned':earlier[-1][0] if earlier else None},
 +            'newly_published':{**fresh_counts,**new_scope,
-+              'first_evidence_not_in_older_archive':len(fresh_ids-earlier_ids),
++              'first_evidence_not_in_older_archive':len(fresh_ids-preexisting_ids),
 +              'tags':[tag for tag,_ in newer]},
-+            'total_additional':found_counts,'remaining':len(still),
++            'baseline_capped_assets':{**missed_counts,**missed_scope},
++            'preexisting_total':preexisting_counts,'total_additional':found_counts,'remaining':len(still),
++            'requested_start':min(start for ranges in focus.values() for start,_,_ in ranges).isoformat(),
++            'requested_end':max(end for ranges in focus.values() for _,end,_ in ranges).isoformat(),
 +            'remaining_cause':_source_causes(latest,still,focus,core,eligible,positions,
-+                                            before_touched | fresh_touched | deeper_touched)}
++                                            before_touched | fresh_touched | deeper_touched | missed_touched)}
 +
 +
 +def audit_us_coverage(gh, repo, releases, configuration, catalog, work, *, key, restore_task_state):
