@@ -11,8 +11,8 @@ import zipfile
 
 ARCHIVE_BASE_SHA256='94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba'
 ARCHIVE_SOURCE_SHA256='c286220e451c554e71203c9f9c088a88535f6cded84e2a777c1a723df06af78c'
-CYCLE_SOURCE_SHA256='59a4ded9f66041e5f988d12f5f245b81b68c5b0694d3a00801059be0f0997df4'
-ARCHIVE_PATCH_SHA256='46d4fd7d5c351cfaa9e83026875d2845e81338ef01b5cc9ec876428d2bf5c6a4'
+CYCLE_SOURCE_SHA256='64b04e3532894f7aa3cb9aec93c6c335751c3837152e58fcc6fba8c85fdd07aa'
+ARCHIVE_PATCH_SHA256='d34fb8a1af3a76e92b49f6567dac2fbdf9ea1a8e978d4df59949b012e74d7444'
 
 
 def command(arguments,**kwargs):
@@ -30,7 +30,8 @@ def apply_task_archive_overlay(runtime,base_sha256):
         runtime/'src/backtest_data/remote/task_archive.py':ARCHIVE_SOURCE_SHA256,
         runtime/'scripts/remote_extended_cycle.py':CYCLE_SOURCE_SHA256,
         runtime/'src/backtest_data/remote/extra_cadence.py':'6eb2f5eb633546792c06b809aeb1d7b35e315809c20dcf296cc08a6183945346',
-        runtime/'src/backtest_data/remote/extra_price_reconcile.py':'b94ee3c4dc44d50d50dfba9a247004db623d95df73b71ea82d0e0ce6ad77e685',
+        runtime/'src/backtest_data/remote/extra_price_reconcile.py':'2e2e1715b0c970f5bcf246584bf3df8ea1f0c297dc40b50e73f88aeda06e48f7',
+        runtime/'src/backtest_data/remote/extra_price_mapping.py':'d4046968591c1824f4ca14d79f69a82c2da197d4e6079ee180f9f67a8eaab4bc',
         runtime/'src/backtest_data/remote/worker.py':'db0a7e1c815bb13a8267e4b6c524d4ca774ff506b615318857d8321061b0f985',
         runtime/'src/backtest_data/ingestion/jobs.py':'44c4a2eb149880c3271bc136c7f2c43d4622a26b9e0dfbee53cc528c40c6944a',
         runtime/'src/backtest_data/prices/storage.py':'a4cd5d85066646bdf7377ba3654193bd738391d8d47a737367754e20f3b9eece',
@@ -40,7 +41,7 @@ def apply_task_archive_overlay(runtime,base_sha256):
         runtime/'src/backtest_data/ingestion/supervisor.py':'9bd31d3288b85231cb8c07c0ab0210dba563986304b63cac1aa2bd680f6e4ae3',
     }
     for source in sources:
-        if source == runtime/'src/backtest_data/remote/extra_price_reconcile.py' and not source.exists():
+        if source.name in {'extra_price_reconcile.py', 'extra_price_mapping.py'} and not source.exists():
             continue
         canonical=source.read_text(encoding='utf-8')
         source.write_text(canonical,encoding='utf-8',newline='\n')

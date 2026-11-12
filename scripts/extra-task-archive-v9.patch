@@ -387,7 +387,7 @@
 +        pending.rename(destination)
 --- a/scripts/remote_extended_cycle.py
 +++ b/scripts/remote_extended_cycle.py
-@@ -1,21 +1,30 @@
+@@ -1,21 +1,33 @@
  """Dedicated fresh-runner extra collection with encrypted state and deltas."""
  import argparse
 +from datetime import datetime
@@ -414,13 +414,16 @@
 -from backtest_data.remote.extended_sync import read_encrypted_commit
 +from backtest_data.remote.extended_sync import bundle_receipts,read_encrypted_commit
 +from backtest_data.remote.extra_cadence import price_ready_date
++from backtest_data.remote.extra_price_mapping import (
++    audit_and_repair_us_mappings, current_master_symbols, read_mapping_catalog,
++)
 +from backtest_data.remote.extra_price_reconcile import (
-+    candidate_price_keys, prior_scope_counts, reconcile_price_queue, stored_price_keys,
++    candidate_price_keys, expanded_scope_counts, prior_scope_counts, reconcile_price_queue, stored_price_keys,
 +)
  from backtest_data.remote.extra_quotas import PARTITIONS,reserve_allowance,quota_ready
  from backtest_data.remote.folder import FolderTransport
  from backtest_data.remote.planner import validate_ownership
-@@ -28,7 +37,9 @@
+@@ -28,7 +40,9 @@
  from backtest_data.remote.identity import validate_raw_identity_index
  from backtest_data.remote.resume import LazyWindowResolver,window_snapshot,compact_windows
  from backtest_data.remote.paced_publication import publish_release
@@ -431,7 +434,7 @@
  
  
  def publication_summary(head,tag,state):
-@@ -45,9 +56,94 @@
+@@ -45,9 +59,98 @@
          'source_handler_status_counts':counts,'coverage_complete':False}
  
  
@@ -482,7 +485,7 @@
 +    return hydrate_checkpoint(checkpoint, root, binding=incoming_binding), (ref, index)
 +
 +
-+def audit_previous_scope(gh, repo, releases, configuration, sequence, work, *, key):
++def audit_previous_scope(gh, repo, releases, configuration, sequence, work, *, key, catalog, current):
 +    stream, bootstrap = configuration['owner_id'], configuration['bootstrap']['sha256']
 +    prefix = release_tag(stream, sequence)
 +    position = next((i for i, release in enumerate(releases[:-1])
@@ -514,7 +517,11 @@
 +        return {'status': 'extra_price_prior_scope_audited', 'sequence': sequence, 'tag': release['tag_name'],
 +                'successor_tag': successor['tag_name'],
 +                'ready_dates': {source: day.isoformat() for source, day in ready_dates.items()},
-+                'by_market': prior_scope_counts(checkpoint['task_state'], ready_dates=ready_dates)}
++                'by_market': prior_scope_counts(checkpoint['task_state'], ready_dates=ready_dates),
++                'expanded_by_market': expanded_scope_counts(checkpoint['task_state'], ready_dates=ready_dates),
++                'unqualified_us_mapping': audit_and_repair_us_mappings(
++                    checkpoint, catalog, ready_dates=ready_dates, current=current),
++                'official_current_master_status': current[1]}
 +
 +
  def main(argv=None):
@@ -527,17 +534,20 @@
      if not 30<=args.budget_seconds<=4800:raise ValueError('bounded extra-source batch required')
      configuration=json.loads(os.environ['REMOTE_EXTENDED_OWNERSHIP']);validate_ownership(configuration)
      if configuration.get('version')!=2 or configuration['owner_id']!='extra-forward-v1':raise ValueError('explicit extra forward ownership required')
-@@ -64,6 +160,9 @@
+@@ -64,6 +167,12 @@
      if digest(work/'bootstrap-download/catalog.zip.enc')!=binding['sha256']:raise ValueError('exact bootstrap digest required')
      restore(work/'catalog.zip',work/'catalog',2*1024**3)
      checkpoint=read_state(work/'initial-state.json.gz');releases=inventory(gh,repo,stream)
++    catalog = read_mapping_catalog(FolderTransport(work/'catalog').committed_bundles(), configuration['manifest_id'])
 +    if args.audit_previous_sequence is not None:
++        current = current_master_symbols()
 +        print(json.dumps(audit_previous_scope(
-+            gh, repo, releases, configuration, args.audit_previous_sequence, work, key=key)), flush=True)
++            gh, repo, releases, configuration, args.audit_previous_sequence, work, key=key,
++            catalog=catalog, current=current)), flush=True)
      previous=None;prior_hash=None;prior_tag=None;sequence=1;prior=None
      if releases:
          release=releases[-1];path=download_asset(gh,repo,release,'commit.json',work/'previous',max_bytes=1024**2)
-@@ -74,14 +173,17 @@
+@@ -74,14 +183,17 @@
          checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
          previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
      task_binding=make_binding(configuration,stream,start_sequence=sequence)
@@ -559,13 +569,17 @@
      readiness=configuration.get('quota_partition_ready',{})
      allowance=None;fsc_allowance=None
      if readiness.get('alpha_vantage') is True and quota_ready(configuration,'alpha_vantage',utcnow()):
-@@ -127,13 +229,28 @@
+@@ -127,13 +239,32 @@
          checkpoint['raw_identity_archive']=archive.checkpoint_state()
          resolver=LazyWindowResolver(engine,gh=gh,repo=repo,stream=stream,bootstrap_hash=binding['sha256'],key=key,
              work=work/'lazy-resume',raw_root=raw)
 +        cycle_as_of=utcnow()
 +        if prior is not None and configuration.get('etf_cadence') == 'split_daily_weekly_v1':
 +            ready_dates = {source: price_ready_date(source,cycle_as_of) for source in ('kis','kis_overseas')}
++            initial_scope = expanded_scope_counts(checkpoint['task_state'], ready_dates=ready_dates)
++            mapping_result = audit_and_repair_us_mappings(checkpoint, catalog, ready_dates=ready_dates, apply=True)
++            print(json.dumps({'status':'extra_us_price_mapping_audited', 'previous_sequence':prior['end_sequence'],
++                'before_by_market':initial_scope, 'mapping':mapping_result}), flush=True)
 +            candidates = candidate_price_keys(checkpoint.get('task_state', []),ready_dates)
 +            stored, evidence = predecessor_price_evidence(
 +                gh,repo,release,prior,work,key=key,candidates=candidates)
@@ -590,7 +604,7 @@
          head=result['head'];state=unpack(read_manifest(store/'bundles'/head['bundle_id'])['checkpoint'])
          state.update(handoff_id=configuration['handoff_id'],forward_start=configuration['forward_start'])
          tag=release_tag(stream,head['sequence'],attempt=os.environ['GITHUB_RUN_ID']+'-a'+os.environ.get('GITHUB_RUN_ATTEMPT','1'))
-@@ -143,8 +260,14 @@
+@@ -143,8 +274,14 @@
              scope=full_manifest_scope(session.get(TargetUniverseManifest,configuration['manifest_id']))
              resumed=create_resume_store(session,raw,work/'resume-output',stream=stream,scope=scope,checkpoint=state,generation=head['sequence'])
              state['raw_identity_archive'],raw_assets=archive.export(session,tag=tag,sequence=head['sequence'])
@@ -606,7 +620,7 @@
          # Initial bootstrap did not occupy the state path; all files use fresh
          # names in this generation even when a predecessor was restored.
          zip_store(resumed,work/'next-resume.zip')
-@@ -164,7 +287,7 @@
+@@ -164,7 +301,7 @@
              'created_at':utcnow().isoformat(),'coverage_complete':False}
          commit_path=work/'commit.json';commit_path.write_text(json.dumps(commit,sort_keys=True),encoding='utf-8')
          read_encrypted_commit(commit_path,stream=stream,bootstrap_hash=binding['sha256'])
@@ -1657,7 +1671,7 @@
              "response_valid": response_valid, "pagination_valid": pagination_valid,
 --- /dev/null
 +++ b/src/backtest_data/remote/extra_price_reconcile.py
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,312 @@
 +"""Conservative reconciliation for owned KIS price requests."""
 +
 +from collections import Counter, defaultdict
@@ -1777,6 +1791,29 @@
 +    if dates is None or dates[1] >= ready_dates[task['source']]:
 +        return None
 +    return MARKET_BY_SOURCE[task['source']], *dates, *route
++
++
++def expanded_scope_counts(tasks, *, ready_dates):
++    counts = {market: Counter() for market in MARKET_BY_SOURCE.values()}
++    for task in tasks:
++        source = task['source']
++        if source not in MARKET_BY_SOURCE or task['status'] not in UNFINISHED:
++            continue
++        market, request = MARKET_BY_SOURCE[source], task['request']
++        if task['domain'] != 'prices' or request.get('market') != market:
++            reason = 'market_or_domain'
++        elif not _window_policy(request, allow_correction=True):
++            reason = 'unrecognized_policy'
++        elif (dates := _dates(request)) is None:
++            reason = 'invalid_dates'
++        elif _provider_route(task) is None:
++            reason = 'unqualified_route'
++        elif dates[1] >= ready_dates[source]:
++            reason = 'not_past_ready_date'
++        else:
++            reason = 'eligible'
++        counts[market][reason] += 1
++    return counts
 +
 +
 +@lru_cache(maxsize=4096)
@@ -1947,3 +1984,216 @@
 +            for source, queue in checkpoint['price_history_queue'].items()
 +        }
 +    return stats
+--- /dev/null
++++ b/src/backtest_data/remote/extra_price_mapping.py
+@@ -0,0 +1,210 @@
++"""Audit missing KIS US routes and replace requests only from bound catalog evidence."""
++
++from collections import Counter, defaultdict
++from concurrent.futures import ThreadPoolExecutor
++from datetime import datetime
++from urllib.request import urlopen
++from zoneinfo import ZoneInfo
++
++from ..catalog.kis_overseas import MASTER_DIRECTORIES, MAX_MASTER_BYTES, parse_kis_overseas_master
++from ..catalog.provider_symbols import directory_cqs_symbol
++from ..db import new_id
++from ..ingestion.jobs import logical_request, stable_hash
++from ..remote_updates import restored_mapping
++from .bundle import iter_bundle_rows
++from .extra_price_reconcile import UNFINISHED, US_VENUES, WAITING, _dates, _provider_route, _window_policy
++
++
++MAPPING_FAILURES = {'restored_exact_master_mapping_unavailable', 'exact_master_mapping_unavailable',
++                    'kis_overseas_mapping_unavailable', 'kis_overseas_master_incomplete',
++                    'kis_overseas_mapping_ambiguous'}
++
++
++def read_mapping_catalog(paths, manifest_id):
++    members = None
++    observations = defaultdict(list)
++    for path in paths:
++        for row in iter_bundle_rows(path):
++            values = row['values']
++            if row['table'] == 'target_universe_manifest' and values['id'] == manifest_id:
++                members = {member['security_id']: member for member in values['members'] if member['market'] == 'US'}
++            if row['table'] == 'catalog_observation' and values['source'] == 'kis_overseas_master':
++                observations[values['identifier']].append(values)
++    if members is None:
++        raise ValueError('owned US target manifest required for mapping audit')
++    return {'members': members, 'observations': observations}
++
++
++def current_master_symbols():
++    """Read the official directories for diagnostics; these observations do not backdate routes."""
++    def read(directory):
++        exchange, url = directory
++        try:
++            with urlopen(url, timeout=15) as response:
++                content = response.read(MAX_MASTER_BYTES + 1)
++            return exchange, parse_kis_overseas_master(content, exchange)
++        except (OSError, ValueError):
++            return exchange, None
++
++    symbols = defaultdict(set)
++    status = {}
++    with ThreadPoolExecutor(max_workers=len(MASTER_DIRECTORIES)) as pool:
++        for exchange, rows in pool.map(read, MASTER_DIRECTORIES):
++            status[exchange] = 'verified' if rows else 'unavailable'
++            for row in rows or ():
++                symbols[row.provider_symbol].add(exchange)
++    return symbols, status
++
++
++def _current_master_reason(member, current):
++    symbols, status = current
++    if not status or any(state != 'verified' for state in status.values()):
++        return 'current_master_incomplete'
++    if member is None:
++        return 'target_identity_unavailable'
++    symbol = member['symbol']
++    if matches := symbols.get(symbol):
++        return 'unique_current_exact_match' if len(matches) == 1 else 'ambiguous_current_exact_match'
++    try:
++        alias = directory_cqs_symbol(member)
++    except ValueError:
++        alias = symbol
++    if alias != symbol and (matches := symbols.get(alias)):
++        return 'unique_current_official_cqs_match' if len(matches) == 1 else 'ambiguous_current_official_cqs_match'
++    return 'no_current_exact_or_official_cqs_match'
++
++
++def _proofs(member, rows):
++    proofs = []
++    routes = set()
++    for row in rows:
++        fields = row['fields'] or {}
++        if fields.get('provider_symbol') == member['symbol'] and fields.get('exchange') in US_VENUES:
++            routes.add(fields['exchange'])
++        if fields.get('market') != 'US' or not (proof := restored_mapping(fields, member, row['id'])):
++            continue
++        try:
++            stamp = datetime.fromisoformat(proof['master_captured_at'])
++        except (ValueError, TypeError):
++            continue
++        if stamp.utcoffset() is not None:
++            proofs.append((stamp.astimezone(ZoneInfo('America/New_York')).date(), stamp, proof))
++    return routes, sorted(proofs, key=lambda item: (item[0], item[1], item[2]['catalog_observation_id']))
++
++
++def _decision(task, member, symbol_counts, archived, ready_dates):
++    request = task['request']
++    if member is None or request.get('symbol') != member['symbol']:
++        return 'target_identity_mismatch', None
++    if symbol_counts[member['symbol']] != 1:
++        return 'target_symbol_not_unique', None
++    dates = _dates(request)
++    if not _window_policy(request, allow_correction=True) or dates is None:
++        return 'unsupported_window_contract', None
++    if dates[1] >= ready_dates['kis_overseas']:
++        return 'window_not_ready', None
++    checkpoint = task['checkpoint']
++    if set(checkpoint) - {'reason'} or (checkpoint.get('reason') is not None
++                                       and checkpoint['reason'] not in MAPPING_FAILURES):
++        return 'prior_collection_evidence', None
++    if (request.get('mapping_status') != 'unsupported' or request.get('provider_symbol')
++            or request.get('exchange') or request.get('mapping_evidence') or task['status'] == 'failed'):
++        return 'conflicting_request_route', None
++    rows = archived.get(member['identifier'], ())
++    if not rows:
++        return 'no_archived_master_record', None
++    routes, proofs = _proofs(member, rows)
++    if len(routes) > 1:
++        return 'conflicting_catalog_routes', None
++    if not proofs:
++        return 'archived_master_not_qualified', None
++    prior = [proof for day, _, proof in proofs if day <= dates[0]]
++    if not prior:
++        return 'catalog_capture_after_window_start', None
++    return 'verified_catalog_route', prior[-1]
++
++
++def _work_key(task, request):
++    fields = logical_request(request)
++    fields.pop('mapping_evidence', None)
++    return stable_hash([task['source'], task['domain'], task['entity_id'], fields])
++
++
++def _can_reuse(task):
++    request, checkpoint = task['request'], task['checkpoint']
++    proof = request.get('mapping_evidence') or {}
++    if (proof.get('qualified_current_mapping') is not True or proof.get('security_id') != task['entity_id']
++            or proof.get('market') != 'US' or proof.get('provider_symbol') != request['provider_symbol']
++            or proof.get('exchange') != request['exchange']):
++        return False
++    return (task['status'] in WAITING or (task['status'] == 'succeeded'
++            and checkpoint.get('response_valid') is True and checkpoint.get('pagination_valid') is True))
++
++
++def audit_and_repair_us_mappings(checkpoint, catalog, *, ready_dates, apply=False, current=None):
++    """Retain original request IDs and evidence, adding only a separately bound replacement."""
++    tasks = checkpoint['task_state']
++    members, observations = catalog['members'], catalog['observations']
++    symbol_counts = Counter(member['symbol'] for member in members.values())
++    reasons, current_reasons, securities, current_securities = Counter(), Counter(), defaultdict(set), defaultdict(set)
++    pending_repairs = []
++    for task in tasks:
++        if (task['source'] != 'kis_overseas' or task['domain'] != 'prices'
++                or task['request'].get('market') != 'US' or task['status'] not in UNFINISHED
++                or _provider_route(task) is not None):
++            continue
++        member = members.get(task['entity_id'])
++        reason, proof = _decision(task, member, symbol_counts, observations, ready_dates)
++        reasons[reason] += 1
++        securities[reason].add(task['entity_id'])
++        if current is not None:
++            current_reason = _current_master_reason(member, current)
++            current_reasons[current_reason] += 1
++            current_securities[current_reason].add(task['entity_id'])
++        if proof and apply:
++            pending_repairs.append((task, proof))
++
++    applied, reused, held_existing = 0, 0, 0
++    if pending_repairs:
++        affected = {task['entity_id'] for task, _ in pending_repairs}
++        equivalents = defaultdict(list)
++        for task in tasks:
++            if task['source'] == 'kis_overseas' and task['entity_id'] in affected and _provider_route(task) is not None:
++                equivalents[_work_key(task, task['request'])].append(task)
++        new_tasks, replaced, retired = [], {}, set()
++        for task, proof in pending_repairs:
++            request = dict(task['request'], mapping_status='qualified', mapping_evidence=proof,
++                           exchange=proof['exchange'], provider_symbol=proof['provider_symbol'])
++            request.pop('mapping_reason', None)
++            work_key = _work_key(task, request)
++            group = equivalents.get(work_key, ())
++            survivor = next((row for row in group if _can_reuse(row)), None)
++            if survivor is None and group:
++                held_existing += 1
++                continue
++            if survivor is None:
++                identity = stable_hash([task['source'], task['domain'], task['entity_id'], logical_request(request)])
++                survivor = dict(task, id=new_id(), identity_hash=identity, request=request,
++                                status='pending', attempts=0, checkpoint={})
++                new_tasks.append(survivor)
++                equivalents[work_key].append(survivor)
++            else:
++                reused += 1
++            task['status'] = 'superseded'
++            task['checkpoint'] = {**task['checkpoint'], 'reason': 'replaced_by_verified_kis_master_route'}
++            retired.add(task['identity_hash'])
++            replaced[task['id']] = survivor['id'] if survivor['status'] in WAITING else None
++            applied += 1
++        checkpoint['task_state'] = [*tasks, *new_tasks]
++        if 'unfinished_task_ids' in checkpoint:
++            checkpoint['unfinished_task_ids'] = [identity for identity in checkpoint['unfinished_task_ids']
++                                                if identity not in retired] + [task['identity_hash'] for task in new_tasks]
++        if 'price_history_queue' in checkpoint:
++            checkpoint['price_history_queue'] = {
++                source: list(dict.fromkeys(job for old in queue if (job := replaced.get(old, old)) is not None))
++                for source, queue in checkpoint['price_history_queue'].items()
++            }
++    return {'reasons': reasons, 'securities_by_reason': {reason: len(ids) for reason, ids in securities.items()},
++            'current_master_match': current_reasons,
++            'current_master_securities': {reason: len(ids) for reason, ids in current_securities.items()},
++            'applied': applied, 'reused_mapped_request': reused, 'held_existing_mapped_request': held_existing}
