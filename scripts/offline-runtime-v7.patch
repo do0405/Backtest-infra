@@ -271,7 +271,313 @@
  
 --- a/src/backtest_data/offline/acquisition.py
 +++ b/src/backtest_data/offline/acquisition.py
-@@ -440,25 +440,6 @@
+@@ -2,7 +2,9 @@
+ from copy import deepcopy
+ from datetime import date, datetime, timedelta, timezone
+ from decimal import Decimal
++from functools import lru_cache
+ from hashlib import sha256
++from math import isfinite
+ import json
+ import re
+ import time
+@@ -15,6 +17,8 @@
+ from ..ingestion.http import ProviderError
+ from ..remote.codec import PaginationCursor
+ from ..ops.source_cadence import provider_ready_date
++from ..prices.adapters.alpaca import new_york_session
++from ..catalog.provider_symbols import alpaca_price_routes, directory_cqs_symbol, legacy_alpaca_symbol_end
+ 
+ SOURCES = ('alpaca', 'sec', 'opendart')
+ MEMBERS = {'alpaca': 'us_prices', 'sec': 'sec_issuers', 'opendart': 'dart_issuers'}
+@@ -158,7 +162,7 @@
+             pending['start'] = min(pending['start'], existing['start'])
+             pending['end'] = max(pending['end'], existing['end'])
+             pending['next_retry_at'] = min(pending['next_retry_at'], existing['next_retry_at'])
+-            pending['attempts'] += existing.get('attempts', 0)
++            pending['attempts'] = max(pending['attempts'], existing.get('attempts', 0))
+             pending['range_certification'] = 'union_not_certified'
+         else:
+             retained.append(existing)
+@@ -173,8 +177,128 @@
+     ledger['reason'] = reason
+ 
+ 
++# NYSE and Nasdaq published schedules for the initial forward ownership
++# interval. Beyond it, a peer SIP observation can establish an open session.
++# https://www.nyse.com/trade/hours-calendars
++# https://nasdaqtrader.com/Trader.aspx?id=Calendar
++_SIP_CALENDAR_FIRST = '2026-10-08'
++_SIP_CALENDAR_LAST = '2026-12-31'
++_SIP_CLOSED = {'2026-11-26', '2026-12-25'}
++
++
++@lru_cache(maxsize=256)
++def _sip_session(stamp):
++    try:
++        return new_york_session(datetime.fromisoformat(stamp)).isoformat()
++    except (TypeError, ValueError):
++        return None
++
++
++def _price_row_day(row, start, end):
++    if not isinstance(row, dict) or not isinstance(stamp := row.get('t'), str):
++        return None
++    day = _sip_session(stamp)
++    if day is None or not start <= day <= end:
++        return None
++    o, h, l, c, v = (row.get(field) for field in ('o', 'h', 'l', 'c', 'v'))
++    if all(type(value) in (int, float, Decimal) and isfinite(value) for value in (o, h, l, c, v)):
++        if 0 < l <= min(o, c) <= max(o, c) <= h and v >= 0:
++            return day
++    return None
++
++
++def _price_days(start, end, *, include_unverified=False):
++    for ordinal in range(date.fromisoformat(start).toordinal(), date.fromisoformat(end).toordinal() + 1):
++        value = date.fromordinal(ordinal)
++        if value.weekday() < 5:
++            day = value.isoformat()
++            if day not in _SIP_CLOSED and (include_unverified or _SIP_CALENDAR_FIRST <= day <= _SIP_CALENDAR_LAST):
++                yield day
++
++
++def _price_spans(days):
++    # Never cross a date for which the request no longer needs a bar.
++    spans = []
++    for day in sorted(days):
++        ordinal = date.fromisoformat(day).toordinal()
++        if spans and ordinal == previous + 1:
++            spans[-1] = spans[-1][0], day
++        else:
++            spans.append((day, day))
++        previous = ordinal
++    return spans
++
++
++def _subtract_observed_price_days(gap, observed):
++    if not gap or not observed:
++        return
++    remaining = []
++    for pending in gap['ranges']:
++        start, end = pending['start'], pending['end']
++        covered = sorted(day for day in observed if start <= day <= end)
++        if pending.get('request_anchor') or not covered:
++            remaining.append(pending)
++            continue
++        for day in covered:
++            if start < day:
++                remaining.append({**pending, 'start': start,
++                    'end': (date.fromisoformat(day) - timedelta(days=1)).isoformat()})
++            start = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
++        if start <= end:
++            remaining.append({**pending, 'start': start, 'end': end})
++    gap['ranges'] = remaining
++
++
++def _member_price_routes(member, start, end):
++    source = member.get('source_member')
++    if source is None:
++        return [(start, end, member['symbol'])]
++    if (source.get('security_id') != member['entity_id']
++            or directory_cqs_symbol(source) != member['symbol']):
++        raise ValueError('price catalog symbol binding mismatch')
++    return alpaca_price_routes(source, start, end)
++
++
++def _primary_price_routes(state, batch, cycle, now):
++    if cycle.get('cursor') is not None:
++        # Checkpoints from before CMS routing keep their original request.
++        routes = cycle.get('price_request_symbols')
++        return batch if routes is None else [member for member in batch if member['entity_id'] in routes]
++    routes = {}
++    eligible = []
++    start, end = cycle['start'], cycle['end']
++    for member in batch:
++        windows = _member_price_routes(member, start, end)
++        if len(windows) == 1 and windows[0][:2] == (start, end):
++            routes[member['entity_id']] = windows[0][2]
++            eligible.append(member)
++            continue
++        # Keep unaffected securities in the bulk request. The existing retry
++        # scheduler handles the portions on each side of a ticker change.
++        for low, high, _ in windows:
++            gap = state.get('price_gaps', {}).get(member['entity_id'], {})
++            if not any(row['start'] <= low <= high <= row['end'] for row in gap.get('ranges', ())):
++                _record_price_gap(state, member, low, high, now, reason='dated_symbol_boundary')
++    cycle['price_request_symbols'] = routes
++    return eligible
++
++
+ def _price_page(cycle, batch, client, state, *, mode):
+-    symbols = cycle.get('active_symbols', [row['symbol'] for row in batch])
++    if not batch:
++        return [], True, {}, set()
++    routes = cycle.get('price_request_symbols')
++    legacy_cutoffs = {}
++    if routes is None:
++        routes = {row['entity_id']: row['symbol'] for row in batch}
++        for member in batch:
++            if (source := member.get('source_member')) is not None and (
++                    cutoff := legacy_alpaca_symbol_end(source, member['symbol'])) is not None:
++                legacy_cutoffs[member['symbol']] = cutoff.isoformat()
++    request_symbols = [routes[row['entity_id']] for row in batch]
++    if len(set(request_symbols)) != len(request_symbols):
++        raise ValueError('ambiguous price request symbol')
++    original = {routes[row['entity_id']]: row['symbol'] for row in batch}
++    symbols = cycle.get('active_symbols', request_symbols)
+     response, payload = client.bars(symbols, date.fromisoformat(cycle['start']), date.fromisoformat(cycle['end']),
+                                     cycle['cursor'].value if cycle.get('cursor') is not None else None,
+                                     datetime.fromisoformat(cycle['request_anchor']))
+@@ -183,13 +307,25 @@
+         raise ValueError('bulk response symbol binding mismatch')
+     captures = []
+     cycle['active_symbols'] = getattr(response, 'bulk_symbols', symbols)
+-    excluded = set(cycle.get('excluded_symbols', [])) | set(getattr(response, 'unsupported_symbols', []))
++    newly_excluded = {original[symbol] for symbol in getattr(response, 'unsupported_symbols', [])}
++    excluded = set(cycle.get('excluded_symbols', [])) | newly_excluded
+     cycle['excluded_symbols'] = sorted(excluded)
+-    reasons = {**cycle.get('excluded_reasons',{}), **getattr(response,'unsupported_reasons',{})}
++    reasons = {**cycle.get('excluded_reasons', {}),
++        **{original[symbol]: reason for symbol, reason in getattr(response, 'unsupported_reasons', {}).items()}}
+     cycle['excluded_reasons'] = reasons
+-    seen = set(cycle.get('seen_symbols', []))
+-    seen.update(symbol for symbol, rows in bars.items() if rows)
+-    cycle['seen_symbols'] = sorted(seen)
++    if cycle.get('cursor') is not None and 'observed_price_days' not in cycle:
++        # A v9 cursor has no dates for earlier pages. Resume the original
++        # request without claiming completeness or inventing holes in that prefix.
++        cycle['legacy_price_prefix'] = cycle.get('seen_symbols', [])
++    observed = cycle.setdefault('observed_price_days', {})
++    for wire_symbol, rows in bars.items():
++        symbol = original[wire_symbol]
++        if symbol in excluded or not isinstance(rows, list):
++            continue
++        end = min(cycle['end'], legacy_cutoffs.get(symbol, cycle['end']))
++        days = {day for row in rows if (day := _price_row_day(row, cycle['start'], end))}
++        if days:
++            observed[symbol] = sorted(days.union(observed.get(symbol, ())))
+     for member in batch:
+         if member['symbol'] in excluded:
+             _unsupported_price(state, member, cycle['start'], cycle['end'],
+@@ -198,7 +334,7 @@
+         # Every security retains the exact shared upstream bytes. The local adapter
+         # selects its own symbol while the source contract records the bulk endpoint.
+         content = response.content
+-        metadata = {'symbol': member['symbol'], 'start': cycle['start'], 'end': cycle['end'],
++        metadata = {'symbol': routes[member['entity_id']], 'start': cycle['start'], 'end': cycle['end'],
+                     'request_anchor': cycle['request_anchor'], 'feed': 'sip', 'adjustment': 'raw', 'asof': '-',
+                     'bulk_endpoint': '/v2/stocks/bars', 'bulk_symbols': getattr(response, 'bulk_symbols', symbols),
+                     'bulk_page_cursor': cycle.get('cursor'), 'capture_mode': mode}
+@@ -208,11 +344,12 @@
+     if token is not None and (not isinstance(token, str) or not token or len(token) > 8192):
+         raise ValueError('invalid provider pagination cursor')
+     cycle['cursor'] = PaginationCursor(token) if token is not None else None
+-    return captures, token is None, seen, excluded
++    return captures, token is None, observed, excluded
+ 
+ 
+ def _clear_price_traversal(cycle):
+-    for key in ('cursor', 'seen_symbols', 'active_symbols', 'excluded_symbols', 'excluded_reasons', 'request_anchor'):
++    for key in ('cursor', 'seen_symbols', 'active_symbols', 'excluded_symbols', 'excluded_reasons', 'observed_price_days',
++                'legacy_price_prefix', 'request_anchor', 'price_request_symbols'):
+         cycle.pop(key, None)
+ 
+ 
+@@ -242,21 +379,38 @@
+ 
+ def _run_primary_price(state, members, client, now, key, cycle):
+     batch = members[cycle['offset']:cycle['offset'] + 100]
+-    captures, exhausted, seen, excluded = _price_page(cycle, batch, client, state,
++    eligible = _primary_price_routes(state, batch, cycle, now)
++    captures, exhausted, observed, excluded = _price_page(cycle, eligible, client, state,
+         mode='recent_correction' if key == 'recent_cycle' else 'forward')
+     state['price_primary_started'] = True
+     if exhausted:
+-        for member in batch:
+-            if member['symbol'] not in seen:
++        expected = set(_price_days(cycle['start'], cycle['end']))
++        expected.update(day for days in observed.values() for day in days)
++        legacy_seen = set(cycle.get('legacy_price_prefix', ()))
++        for member in eligible:
++            symbol = member['symbol']
++            received = observed.get(symbol, ())
++            gap = state.get('price_gaps', {}).get(member['entity_id'])
++            if received:
++                _subtract_observed_price_days(gap, received)
++                if gap:
++                    gap['latest_nonempty_end'] = max(gap.get('latest_nonempty_end', cycle['end']), cycle['end'])
++            if symbol in excluded:
+                 _record_price_gap(state, member, cycle['start'], cycle['end'], now,
+-                    reason=cycle.get('excluded_reasons',{}).get(member['symbol'],'supplier_invalid_symbol')
+-                        if member['symbol'] in excluded else 'supplier_empty_window')
+-            elif member['entity_id'] in state.get('price_gaps', {}):
+-                gap = state['price_gaps'][member['entity_id']]
+-                gap['latest_nonempty_end'] = max(gap.get('latest_nonempty_end', cycle['end']), cycle['end'])
++                    reason=cycle.get('excluded_reasons', {}).get(symbol, 'supplier_invalid_symbol'))
++            elif symbol not in legacy_seen:
++                if received:
++                    for start, end in _price_spans(expected.difference(received)):
++                        if not gap or not any(row['start'] <= start <= end <= row['end'] for row in gap['ranges']):
++                            _record_price_gap(state, member, start, end, now, reason='supplier_partial_sessions')
++                elif expected or cycle['start'] < _SIP_CALENDAR_FIRST or cycle['end'] > _SIP_CALENDAR_LAST:
++                    # A wholly empty traversal is unresolved as before. Keep it
++                    # as one request rather than multiplying dead-symbol calls.
++                    _record_price_gap(state, member, cycle['start'], cycle['end'], now)
+         cycle['offset'] += len(batch)
+         # All primary batches in this cycle retain its original request anchor.
+-        for field in ('seen_symbols', 'active_symbols', 'excluded_symbols', 'excluded_reasons'):
++        for field in ('seen_symbols', 'active_symbols', 'excluded_symbols', 'excluded_reasons',
++                      'observed_price_days', 'legacy_price_prefix', 'price_request_symbols'):
+             cycle.pop(field, None)
+     if exhausted and cycle['offset'] >= len(members):
+         if key == 'recent_cycle':
+@@ -293,11 +447,22 @@
+     member = next((member for member in members if member['entity_id'] == identity), None)
+     if member is None or member['symbol'] != state['price_gaps'][identity]['symbol']:
+         raise ValueError('retry price range catalog binding missing')
++    if pending.get('cursor') is None:
++        start, end = pending['start'], pending['end']
++        windows = _member_price_routes(member, start, end)
++        if len(windows) != 1 or windows[0][:2] != (start, end):
++            ranges = state['price_gaps'][identity]['ranges']
++            ranges.remove(pending)
++            fields = {key: pending[key] for key in ('next_retry_at', 'attempts', 'range_certification') if key in pending}
++            ranges.extend({**fields, 'start': low, 'end': high} for low, high, _ in windows)
++            ranges.sort(key=lambda row: (row['start'], row['end']))
++            return []
++        pending['price_request_symbols'] = {identity: windows[0][2]}
+     if 'request_anchor' not in pending:
+         pending['request_anchor'], pending['cursor'] = now.isoformat(), None
+     before = deepcopy(pending)
+     try:
+-        captures, exhausted, seen, _ = _price_page(pending, [member], client, state, mode='gap_retry')
++        captures, exhausted, observed, _ = _price_page(pending, [member], client, state, mode='gap_retry')
+     except Exception as exc:
+         if isinstance(exc, ProviderError) and exc.code in {'remote_budget_deferred', 'requires_credentials', '401', '403', '429'}:
+             raise
+@@ -309,8 +474,18 @@
+         return []
+     if exhausted:
+         gap = state['price_gaps'][identity]
+-        if member['symbol'] in seen:
+-            _audit_price_recovery(gap, pending, now)
++        received = observed.get(member['symbol'], ())
++        if received:
++            for start, end in _price_spans(received):
++                _audit_price_recovery(gap, {'start': start, 'end': end}, now)
++            remainder = set(_price_days(pending['start'], pending['end'], include_unverified=True))
++            gap['ranges'].remove(pending)
++            due = (now + timedelta(hours=6)).isoformat()
++            replacement = [{'start': start, 'end': end, 'next_retry_at': due,
++                'attempts': pending.get('attempts', 0) + 1, 'range_certification': 'request_recovery_only'}
++                for start, end in _price_spans(remainder.difference(received))]
++            gap['ranges'] = sorted(gap['ranges'] + replacement, key=lambda row: (row['start'], row['end']))
++        elif not any(_price_days(pending['start'], pending['end'], include_unverified=True)):
+             gap['ranges'].remove(pending)
+         else:
+             pending['attempts'] = pending.get('attempts', 0) + 1
+@@ -440,25 +615,6 @@
           'instance_key': 'companyfacts:' + identifier, 'disclosure_profile': 'periodic_report',
           'source_request_metadata': {}, 'companyfacts': {'cik': identifier,
              'accession': accession, 'form': form, 'filing_date': filing.get('filingDate')}})]
@@ -294,6 +600,145 @@
 -        captured_at=capture['captured_at'],content=content,
 -        metadata={**capture['metadata'],'capture_purpose':'source_qualification'}),content)
 -        for capture,content in values]
-
-
+ 
+ 
  def _sec_step(state, members, client, now):
+--- a/src/backtest_data/catalog/provider_symbols.py
++++ b/src/backtest_data/catalog/provider_symbols.py
+@@ -1,5 +1,6 @@
+ """Literal current-directory symbology; never historical ticker certification."""
+ from collections.abc import Mapping
++from datetime import date, timedelta
+ import re
+ 
+ 
+@@ -23,15 +24,68 @@
+     return provider
+ 
+ 
+-def directory_symbol_binding(member, request_symbol):
+-    provider = directory_cqs_symbol(member)
+-    if request_symbol not in (member['symbol'], provider):
+-        raise ValueError('conflicting_directory_symbol_binding')
+-    return {
+-        'policy': 'current_directory_cqs_alias_v1',
+-        'identifier': member['identifier'],
+-        'catalog_symbol': member['symbol'],
+-        'request_symbol': request_symbol,
+-        'cqs_symbol': provider,
+-        'historical_identity_verified': False,
+-    }
++_PREFERRED = re.compile(r'([A-Z0-9]+)p([A-TV-Z])')
++# Exact frozen catalog members. The old SUPN issue ceased trading before
++# Indivior's distinct issue reused the ticker.
++_NASDAQ_TICKER_EVENTS = {
++    'e44a34a4-38a0-5960-8480-e6f9b185581a': ('INDV', '2026-11-03', 'SUPN', '45579U109', 'ECA2026-742'),
++    'fe76957b-e176-58f5-bd0c-9388da2a2de6': ('SUPN', '2026-11-02', None, '868459108', 'ECA2026-742'),
++    '8082ceac-1826-5e03-948d-0766c11e4e00': ('SKK', '2026-10-13', 'RNTZ', 'G8292E110', 'ECA2026-729'),
++}
++
++
++def _dated_event(member, cqs):
++    event = _NASDAQ_TICKER_EVENTS.get(member.get('security_id'))
++    return event if event and event[0] == cqs == member['symbol'] else None
++
++
++def _cms_symbol(member, cqs):
++    # Only an explicit CQS preferred field can establish the CMS alias.
++    evidence = member.get('evidence', member.get('fields', {}))
++    if evidence.get('CQS Symbol') == cqs and (match := _PREFERRED.fullmatch(cqs)):
++        return f'{match[1]}.PR{match[2]}'
++    return cqs
++
++
++def alpaca_price_routes(member, start, end):
++    """Return disjoint inclusive ISO date ranges and exact Alpaca symbols."""
++    cqs = directory_cqs_symbol(member)
++    event = _dated_event(member, cqs)
++    if event is None:
++        return [(start, end, _cms_symbol(member, cqs))]
++    _, switch, new_symbol, _, _ = event
++    windows = []
++    if start < switch:
++        before = (date.fromisoformat(switch) - timedelta(days=1)).isoformat()
++        windows.append((start, min(end, before), cqs))
++    if end >= switch and new_symbol is not None:
++        windows.append((max(start, switch), end, new_symbol))
++    return windows
++
++
++def legacy_alpaca_symbol_end(member, request_symbol):
++    cqs = directory_cqs_symbol(member)
++    event = _dated_event(member, cqs)
++    if event is not None and request_symbol == cqs:
++        return date.fromisoformat(event[1]) - timedelta(days=1)
++    return None
++
++
++def directory_symbol_binding(member, request_symbol, *, start=None, end=None):
++    cqs = directory_cqs_symbol(member)
++    policy = 'current_directory_cqs_alias_v1'
++    proof = {}
++    if request_symbol not in (member['symbol'], cqs):
++        event = _dated_event(member, cqs)
++        if request_symbol == _cms_symbol(member, cqs):
++            policy = 'alpaca_cms_preferred_alias_v1'
++        elif event and request_symbol == event[2] and start is not None and end is not None and (
++                alpaca_price_routes(member, start.isoformat(), end.isoformat()) ==
++                [(start.isoformat(), end.isoformat(), request_symbol)]):
++            policy = 'nasdaq_dated_symbol_alias_v1'
++            proof = {'effective_session': event[1], 'cusip': event[3],
++                'notice': f'https://www.nasdaqtrader.com/TraderNews.aspx?id={event[4]}'}
++        else:
++            raise ValueError('conflicting_directory_symbol_binding')
++    return {'policy': policy, 'identifier': member['identifier'], 'catalog_symbol': member['symbol'],
++        'request_symbol': request_symbol, 'cqs_symbol': cqs, 'historical_identity_verified': False, **proof}
+--- a/src/backtest_data/prices/adapters/alpaca.py
++++ b/src/backtest_data/prices/adapters/alpaca.py
+@@ -70,9 +70,11 @@
+ 
+     def _validate_symbol(self):
+         if self.source_member is not None:
+-            from ...catalog.provider_symbols import directory_cqs_symbol
++            from ...catalog.provider_symbols import directory_cqs_symbol, directory_symbol_binding
+             if self.symbol != directory_cqs_symbol(self.source_member):
+-                raise ValueError('conflicting_directory_symbol_binding')
++                binding = directory_symbol_binding(self.source_member, self.symbol, start=self.start, end=self.end)
++                if binding['policy'] == 'current_directory_cqs_alias_v1':
++                    raise ValueError('conflicting_directory_symbol_binding')
+         elif self.symbol is not None and not re.fullmatch(SYMBOL_PATTERN, self.symbol):
+             raise ValueError("symbol must be an explicit uppercase ticker")
+ 
+--- a/src/backtest_data/prices/alpaca_storage.py
++++ b/src/backtest_data/prices/alpaca_storage.py
+@@ -111,7 +111,7 @@
+     if member is not None:
+         from ..catalog.provider_symbols import directory_symbol_binding
+         try:
+-            directory_binding = directory_symbol_binding(member, request.symbol)
++            directory_binding = directory_symbol_binding(member, request.symbol, start=request.start, end=request.end)
+             if (member.get('security_id', security_id) != security_id
+                     or member.get('identifier') != security.source_identifier):
+                 directory_binding = None
+--- a/src/backtest_data/offline/replay.py
++++ b/src/backtest_data/offline/replay.py
+@@ -245,6 +245,19 @@
+         payload = {'symbol': metadata['symbol'], 'bars': bars.get(metadata['symbol'], []), 'next_page_token': None}
+     if not isinstance(payload, dict) or not isinstance(payload.get('bars'), list) or payload.get('next_page_token'):
+         raise ValueError('single-symbol completed Alpaca page required')
++    if member is not None:
++        # Old releases retain their exact response, but a reused ticker must
++        # not be attributed to the old issue after the last verified session.
++        from ..catalog.provider_symbols import legacy_alpaca_symbol_end
++        from ..prices.adapters.alpaca import new_york_session
++        cutoff = legacy_alpaca_symbol_end(member, request.symbol)
++        if cutoff is not None and request.end > cutoff:
++            def allowed(row):
++                try:
++                    return new_york_session(datetime.fromisoformat(row['t'])) <= cutoff
++                except (KeyError, TypeError, ValueError):
++                    return True  # Existing storage validates malformed rows.
++            payload = {**payload, 'bars': [row for row in payload['bars'] if allowed(row)]}
+     response = ProviderResponse(content, 200, captured_at, 'application/json')
+     summary = store_alpaca_prices(session, security.id, request, response, payload, raw_root,
+         bulk_capture_context=bulk_context)

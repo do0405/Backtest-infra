@@ -252,9 +252,55 @@ def test_coalesced_page_does_not_mark_a_missing_latest_bar_as_done(cadence, monk
     window = (date.fromisoformat(prior), date.fromisoformat(latest), {'sibling': prior})
     outcome = {'observed_sessions': [prior], 'rejected': 0,
                'response_valid': True, 'pagination_valid': True, 'source_row_count': 99}
-    assert supervisor._record_kis_page(None, {'output_end': latest}, {}, outcome, window) == ('unsupported', 0, 1)
+    request = {'output_start': latest, 'output_end': latest, 'cadence_lane': 'daily_latest'}
+    assert supervisor._record_kis_page(None, request, {}, outcome, window) == ('retry', 0, 1)
     assert finished == [prior]
     assert outcome['normalized_rows_total'] == 0
+    assert outcome['partial_daily_retry'] is True
+    assert supervisor._kis_price_bounds(request, outcome, None) == (date(2026, 11, 10), date(2026, 11, 10))
+    retry = {'observed_sessions': [], 'rejected': 0, 'response_valid': True, 'pagination_valid': True}
+    assert supervisor._record_kis_page(None, request, outcome, retry, None) == ('unsupported', 0, 0)
+    assert finished == [prior]
+
+
+def test_legacy_kis_paginates_then_retries_only_unobserved_sessions(cadence):
+    from types import SimpleNamespace
+    from backtest_data.ingestion import supervisor
+    from backtest_data.remote.checkpoint import runtime_task, snapshot_jobs
+
+    request = dict(market='US', refresh_policy='catchup_and_rolling14_calendar_days_v1',
+                   output_start='2026-11-23', output_end='2026-11-27')
+
+    def record(before, observed, complete=True):
+        outcome = dict(observed_sessions=observed, response_valid=True, pagination_valid=True,
+                       traversal_complete=complete, source_rows_total=len(observed))
+        result = supervisor._record_kis_page(None, request, before, outcome, None)
+        return result[0], outcome
+
+    status, first = record({}, ['2026-11-27'], False)
+    assert status is None
+    status, partial = record(first, ['2026-11-23', '2026-11-25'])
+    assert status == 'retry'
+    job = SimpleNamespace(id='job', identity_hash='hash', source='kis_overseas',
+                          domain='prices', entity_id='entity', request=request,
+                          priority=1, status=status, attempts=2, checkpoint=partial)
+    [snapshot] = snapshot_jobs([job], owned_sources={'kis_overseas'})
+    restored = runtime_task(snapshot)['checkpoint']
+    assert supervisor._kis_price_bounds(request, restored, None) == (date(2026, 11, 24), date(2026, 11, 24))
+    status, done = record(restored, ['2026-11-24'])
+    assert status == 'succeeded'
+    assert done['normalized_rows_total'] == 4
+    assert 'price_gap_windows' not in done
+
+
+def test_extra_coalescing_does_not_requery_a_day_without_pending_work(cadence):
+    from types import SimpleNamespace
+    from backtest_data.ingestion.jobs import coalesce_price_window
+
+    leader = SimpleNamespace(**task('a', '2026-11-10', 'daily_latest'))
+    prior = SimpleNamespace(**task('a', '2026-11-06', 'daily_catchup'), attempts=0)
+    window = coalesce_price_window(leader, [prior], ready_day=date(2026, 11, 10), lane='latest')
+    assert window == (date(2026, 11, 10), date(2026, 11, 10), {})
 
 
 def test_extra_kis_lanes_share_one_token(cadence, monkeypatch):
