@@ -1,15 +1,15 @@
 {
-  "checked_at": "2026-11-12T20:14:48.702471+00:00",
+  "checked_at": "2026-11-13T01:18:28.563775+00:00",
   "collection_outcome": "not_run",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "08bdc11883fb05079046dca39d6981ed15cf02fa",
+  "head_sha": "6886dee966ee8c1cbcd5e1cf733eb9a211263004",
   "latest_data_release": {
     "commit_sha256": "ce79e792f1ad03cf8b003a7acd2a7bf95a367e89c76aed826926f9dd011cc3bb",
     "tag": "offline-core-forward-v1-000000151"
   },
-  "observed_by_run_id": 43298349258,
+  "observed_by_run_id": 43343879691,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
@@ -22,10 +22,10 @@
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-12T18:16:44Z",
-        "id": 43278149155,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-11-13T01:03:19Z",
+        "id": 43341925464,
+        "status": "in_progress"
       },
       "operator_enabled": true,
       "state": "active"
@@ -51,14 +51,14 @@
       "attention": "schedule_unsuccessful",
       "latest_completed_schedule": {
         "conclusion": "failure",
-        "created_at": "2026-11-12T18:33:13Z",
-        "id": 43281019135,
+        "created_at": "2026-11-12T23:50:16Z",
+        "id": 43332170507,
         "status": "completed"
       },
       "latest_observed_schedule": {
         "conclusion": "failure",
-        "created_at": "2026-11-12T18:33:13Z",
-        "id": 43281019135,
+        "created_at": "2026-11-12T23:50:16Z",
+        "id": 43332170507,
         "status": "completed"
       },
       "operator_enabled": true,
