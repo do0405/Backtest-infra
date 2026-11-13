@@ -24,7 +24,7 @@ BUILDS = {
         'base_sha256': '94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba',
         'patch': 'extra-task-archive-v9.patch',
         'helpers': (),
-        'hosted_scripts': {'remote_extended_cycle.py', 'remote-extended-requirements.txt'},
+        'hosted_scripts': {'remote_extended_cycle.py', 'remote-extended-requirements.txt', 'remote-requirements.txt'},
     },
 }
 

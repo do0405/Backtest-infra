@@ -1,5 +1,5 @@
 {
   "format": "extra_runtime_pin_v1",
-  "runtime_tag": "extra-source-runtime-v1-20261112",
-  "runtime_sha256": "bfa1fb55168693a7df25d1f3bbad987bbe2516995a707aeb9de485471c2c9695"
+  "runtime_tag": "extra-source-runtime-v2-20261113",
+  "runtime_sha256": "43305cfb68485104132cec546b34660595061d4ba4bbc2424c2b13bfa41d6a14"
 }

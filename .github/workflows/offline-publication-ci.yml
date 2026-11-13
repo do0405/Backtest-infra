@@ -63,6 +63,9 @@ jobs:
             --output "$RUNNER_TEMP/extra.zip" --verify-and-extract "$RUNNER_TEMP/extra" --verify-published
       - name: Install verification dependencies
         run: python -m pip install . pytest==8.4.2 cryptography==50.0.2 cffi==2.1.1 pycparser==3.0
+      - name: Verify Extra runtime dependency installation
+        run: |
+          python -m pip install --no-deps --dry-run -r "$RUNNER_TEMP/extra/scripts/remote-extended-requirements.txt"
       - name: Verify workflow, release and retry contracts
         run: >-
           python -B -m pytest tests/unit/test_offline_*.py tests/unit/test_remote_releases.py
