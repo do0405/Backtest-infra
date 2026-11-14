@@ -1,36 +1,31 @@
 {
-  "checked_at": "2026-11-14T06:47:02.853502+00:00",
-  "collection_outcome": "success",
-  "core_publication": {
-    "pending_cleanup": "verified",
-    "source_index": "verified",
-    "state": "committed"
-  },
+  "checked_at": "2026-11-14T11:39:28.837759+00:00",
+  "collection_outcome": "not_run",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "b35a4b0cb816c0742ef3a98128f85dc5ea59d4f5",
+  "head_sha": "e0d7a941e65b10d0776352afc2979429768be840",
   "latest_data_release": {
     "commit_sha256": "655f4779235d65e8f8812c091a1510c57765d86f8fb86ca9ace087f540136fa4",
     "tag": "offline-core-forward-v1-000000156"
   },
-  "observed_by_run_id": 43565506842,
+  "observed_by_run_id": 43591053654,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
-      "attention": null,
+      "attention": "schedule_stale",
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-13T23:30:12Z",
-        "id": 43527574450,
+        "created_at": "2026-11-14T06:16:12Z",
+        "id": 43565506842,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": null,
+        "conclusion": "success",
         "created_at": "2026-11-14T06:16:12Z",
         "id": 43565506842,
-        "status": "in_progress"
+        "status": "completed"
       },
       "operator_enabled": true,
       "state": "active"
@@ -56,14 +51,14 @@
       "attention": "schedule_stale",
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-13T23:48:38Z",
-        "id": 43529844422,
+        "created_at": "2026-11-14T06:56:29Z",
+        "id": 43568729358,
         "status": "completed"
       },
       "latest_observed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-13T23:48:38Z",
-        "id": 43529844422,
+        "created_at": "2026-11-14T06:56:29Z",
+        "id": 43568729358,
         "status": "completed"
       },
       "operator_enabled": true,
