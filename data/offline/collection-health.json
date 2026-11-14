@@ -1,20 +1,15 @@
 {
-  "checked_at": "2026-11-14T15:30:30.644137+00:00",
-  "collection_outcome": "success",
-  "core_publication": {
-    "pending_cleanup": "verified",
-    "source_index": "verified",
-    "state": "committed"
-  },
+  "checked_at": "2026-11-14T18:23:12.914023+00:00",
+  "collection_outcome": "not_run",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "da2e5611dc2beb0190a8afea6a4c721dadd4fcdd",
+  "head_sha": "bfdeb3d67771689094ba241f70ff3cc2927db554",
   "latest_data_release": {
     "commit_sha256": "0ef2f7ac396f25a30c6c64437d255635cdb409344cce55145ec9f943cbb7a24e",
     "tag": "offline-core-forward-v1-000000157"
   },
-  "observed_by_run_id": 43607900689,
+  "observed_by_run_id": 43626292714,
   "requires_user": false,
   "run_attempt": 1,
   "workflows": {
@@ -22,15 +17,15 @@
       "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-14T06:16:12Z",
-        "id": 43565506842,
+        "created_at": "2026-11-14T15:01:28Z",
+        "id": 43607900689,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": null,
+        "conclusion": "success",
         "created_at": "2026-11-14T15:01:28Z",
         "id": 43607900689,
-        "status": "in_progress"
+        "status": "completed"
       },
       "operator_enabled": true,
       "state": "active"
@@ -56,15 +51,15 @@
       "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-14T06:56:29Z",
-        "id": 43568729358,
+        "created_at": "2026-11-14T15:18:12Z",
+        "id": 43609439287,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": null,
+        "conclusion": "success",
         "created_at": "2026-11-14T15:18:12Z",
         "id": 43609439287,
-        "status": "in_progress"
+        "status": "completed"
       },
       "operator_enabled": true,
       "state": "active"
