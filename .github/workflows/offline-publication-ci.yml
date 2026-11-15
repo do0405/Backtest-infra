@@ -52,7 +52,7 @@ jobs:
       - name: Build and verify both published runtime pins
         run: |
           curl --fail --silent --show-error --location --retry 3 --max-time 60 \
-            https://github.com/do0405/Backtest-infra/releases/download/offline-core-runtime-v6-20261031/runtime.zip \
+            https://github.com/do0405/Backtest-infra/releases/download/offline-core-runtime-v10-20261113/runtime.zip \
             -o "$RUNNER_TEMP/core-base.zip"
           curl --fail --silent --show-error --location --retry 3 --max-time 60 \
             https://github.com/do0405/Backtest-infra/releases/download/extra-task-archive-v8-20261014-94adf2ef27ae/runtime.zip \
