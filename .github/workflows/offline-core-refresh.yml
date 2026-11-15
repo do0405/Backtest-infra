@@ -16,6 +16,7 @@ jobs:
   refresh:
     if: github.ref == 'refs/heads/main' && vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && github.event.repository.private == false
     runs-on: ubuntu-24.04
+    timeout-minutes: 350
     permissions:
       contents: write
       actions: read
@@ -24,6 +25,8 @@ jobs:
       source_index: ${{ steps.capture.outputs.source_index }}
       pending_cleanup: ${{ steps.capture.outputs.pending_cleanup }}
     steps:
+      - name: Record job start for checkpoint deadline
+        run: echo "BACKTEST_JOB_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:

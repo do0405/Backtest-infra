@@ -16,6 +16,7 @@ jobs:
   refresh:
     if: github.ref == 'refs/heads/main' && vars.REMOTE_EXTENDED_ENABLED == 'true' && vars.REMOTE_EXTENDED_PARTITIONS_READY == 'true' && (github.event_name == 'workflow_dispatch' || vars.REMOTE_EXTENDED_AUTOMATIC_READY == 'true')
     runs-on: ubuntu-24.04
+    timeout-minutes: 350
     services:
       postgres:
         image: postgres:16.10
@@ -29,6 +30,8 @@ jobs:
           --health-cmd "pg_isready -U backtest -d backtest_extra"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
+      - name: Record job start for checkpoint deadline
+        run: echo "BACKTEST_JOB_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:

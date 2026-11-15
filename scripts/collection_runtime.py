@@ -1,6 +1,7 @@
 """The reviewed runtime pin and shared code-only archive boundary."""
 from hashlib import sha256
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
@@ -10,7 +11,7 @@ import zipfile
 
 MAX_ARCHIVE_BYTES = 64 * 1024**2
 MAX_EXPANDED_BYTES = 256 * 1024**2
-HOSTED_JOB_SECONDS = 6 * 60 * 60
+HOSTED_JOB_SECONDS = 350 * 60
 CHECKPOINT_RESERVE_SECONDS = 15 * 60
 PINS = {
     'core': ('offline-runtime.json', 'offline_runtime_pin_v1', r'offline-core-runtime-v\d+-\d{8}'),
@@ -23,8 +24,10 @@ def pin_path(stream):
 
 
 def hosted_collection_deadline():
-    """Leave time for export and upload before the hosted runner stops."""
-    return time.monotonic() + HOSTED_JOB_SECONDS - CHECKPOINT_RESERVE_SECONDS
+    """Use the remaining job time, including setup, with time for publication."""
+    started = os.environ.get('BACKTEST_JOB_STARTED_EPOCH')
+    elapsed = max(0, time.time() - int(started)) if started else 0
+    return time.monotonic() + max(0, HOSTED_JOB_SECONDS - CHECKPOINT_RESERVE_SECONDS - elapsed)
 
 
 def bind_runtime(configuration, stream, path=None):

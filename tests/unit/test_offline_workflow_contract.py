@@ -1,8 +1,19 @@
 from pathlib import Path
+from types import SimpleNamespace
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_acquisition_deadline_subtracts_job_setup_and_checkpoint_reserve(monkeypatch):
+    from scripts import collection_runtime
+
+    monkeypatch.setattr(collection_runtime, 'time', SimpleNamespace(time=lambda: 1300, monotonic=lambda: 100))
+    monkeypatch.setenv('BACKTEST_JOB_STARTED_EPOCH', '1000')
+    assert collection_runtime.hosted_collection_deadline() == 100 + 350 * 60 - 15 * 60 - 300
+    monkeypatch.setenv('BACKTEST_JOB_STARTED_EPOCH', '-25000')
+    assert collection_runtime.hosted_collection_deadline() == 100
 
 
 def test_pending_fallback_is_bounded_and_health_reports_deferred_truthfully():
@@ -40,6 +51,8 @@ def test_production_extra_dispatch_has_no_historical_audit():
     assert set(triggers['workflow_dispatch']['inputs']) == {'budget_seconds'}
     assert 'EXTRA_AUDIT_PREVIOUS_SEQUENCE' not in workflow['jobs']['refresh']['steps'][-1]['env']
     assert 'def audit_previous_scope(' not in (ROOT/'scripts/extra-task-archive-v9.patch').read_text()
+    assert workflow['jobs']['refresh']['timeout-minutes'] == 350
+    assert 'BACKTEST_JOB_STARTED_EPOCH' in workflow['jobs']['refresh']['steps'][0]['run']
 
 
 def test_core_keeps_fallback_on_postpublication_attention():
@@ -65,7 +78,11 @@ def test_core_is_independent_and_dispatch_has_only_collection_budget():
     assert set(triggers) == {'schedule', 'workflow_dispatch'}
     assert set(triggers['workflow_dispatch']['inputs']) == {'budget_seconds'}
     refresh = workflow['jobs']['refresh']
-    assert 'timeout-minutes' not in refresh
+    maintenance = yaml.safe_load((ROOT/'.github/workflows/collection-maintenance.yml').read_text())
+    assert refresh['timeout-minutes'] == 350
+    assert refresh['timeout-minutes'] + maintenance['jobs']['maintain']['timeout-minutes'] <= 360
+    assert 'BACKTEST_JOB_STARTED_EPOCH' in refresh['steps'][0]['run']
     assert 'default' not in triggers['workflow_dispatch']['inputs']['budget_seconds']
     assert "github.ref == 'refs/heads/main'" in refresh['if']
-    assert 'ref' not in refresh['steps'][0].get('with', {})
+    checkout = next(step for step in refresh['steps'] if step.get('uses','').startswith('actions/checkout@'))
+    assert 'ref' not in checkout.get('with', {})
