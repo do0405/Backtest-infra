@@ -1,0 +1,33 @@
+--- a/scripts/offline_refresh.py
++++ b/scripts/offline_refresh.py
+@@ -58,9 +58,9 @@
+ 
+ def main(progress):
+     parser=argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument('--work',type=Path,required=True); parser.add_argument('--budget-seconds',type=int,default=5400)
++    parser.add_argument('--work',type=Path,required=True); parser.add_argument('--budget-seconds',type=int)
+     args=parser.parse_args()
+-    if not 60<=args.budget_seconds<=5400:raise ValueError('bounded capture run with export margin required')
++    if args.budget_seconds is not None and args.budget_seconds<60:raise ValueError('capture override must be at least 60 seconds')
+     configuration=json.loads(os.environ['OFFLINE_CONFIGURATION']); repo=os.environ['REPOSITORY']
+     gh=shutil.which('gh')
+     if not gh:raise ValueError('GitHub CLI required')
+@@ -101,12 +101,16 @@
+     if configuration.get('dart_not_before') and datetime.now(timezone.utc)<datetime.fromisoformat(configuration['dart_not_before']):
+         budget.remaining['opendart']=0
+     started=time.monotonic()
+-    http=CaptureHTTP(budget,deadline=started+args.budget_seconds)
++    hosted_deadline=os.environ.get('BACKTEST_ACQUISITION_DEADLINE')
++    deadline=float(hosted_deadline) if hosted_deadline else started+5400
++    if args.budget_seconds is not None:
++        deadline=min(deadline,started+args.budget_seconds) if hosted_deadline else started+args.budget_seconds
++    http=CaptureHTTP(budget,deadline=deadline)
+     try:
+         credentials=load_credentials(sources=['alpaca','sec','opendart']); client=NativeClients(http,credentials)
+         updated, captures = acquire_tick(
+             catalog, state, {name: client for name in ('alpaca', 'sec', 'opendart')},
+-            now=datetime.now(timezone.utc), deadline=started+args.budget_seconds, max_steps=20000,
++            now=datetime.now(timezone.utc), deadline=deadline, max_steps=20000,
+         )
+         updated['used_calls']=budget.used
+         commit=transport.publish(build_bundles(captures),updated)

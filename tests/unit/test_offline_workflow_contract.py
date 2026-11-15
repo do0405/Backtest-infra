@@ -29,6 +29,9 @@ def test_recovery_checks_are_required_on_relevant_main_pushes_without_database()
     assert 'services' not in job
     assert any('tests/runtime' in step.get('run','') for step in job['steps'])
     assert workflow['permissions'] == {'contents':'read'}
+    build = next(step['run'] for step in job['steps'] if 'build_offline_runtime.py' in step.get('run',''))
+    assert '--stream core' in build and '--stream extra' in build and '--verify-published' in build
+    assert '--base ' not in build and '/releases/download/' not in build
 
 
 def test_production_extra_dispatch_has_no_historical_audit():
@@ -62,5 +65,7 @@ def test_core_is_independent_and_dispatch_has_only_collection_budget():
     assert set(triggers) == {'schedule', 'workflow_dispatch'}
     assert set(triggers['workflow_dispatch']['inputs']) == {'budget_seconds'}
     refresh = workflow['jobs']['refresh']
+    assert 'timeout-minutes' not in refresh
+    assert 'default' not in triggers['workflow_dispatch']['inputs']['budget_seconds']
     assert "github.ref == 'refs/heads/main'" in refresh['if']
     assert 'ref' not in refresh['steps'][0].get('with', {})

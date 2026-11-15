@@ -50,19 +50,22 @@ class Remote:
         raise AssertionError((method, endpoint))
 
 
-def test_partial_draft_keeps_existing_assets_and_uploads_only_missing(tmp_path):
+def test_partial_draft_keeps_existing_assets_and_uploads_only_missing(tmp_path, monkeypatch):
     m = module()
     files = {'state.json.gz': b'state', 'captures-0001.zip': b'captures', 'commit.json': b'commit'}
     remote = Remote(files)
     remote.error = m.GitHubError
     remote.release['assets'] = [asset(name, files[name], i) for i, name in enumerate(list(files)[:2], 1)]
     before = list(remote.release['assets'])
+    hashed=[]
+    monkeypatch.setattr(m,'sha256',lambda raw:hashed.append(raw) or sha256(raw))
     result = m.publish_files(remote, 'a/b', remote.release, files, tmp_path, sleep=lambda _: None)
     assert result['draft'] is False
     assert remote.release['assets'][:2] == before
     assert [url for method, url in remote.calls if method == 'POST'] == [
         'https://uploads.github.com/repos/a/b/releases/101/assets?name=commit.json']
     assert all(method != 'DELETE' for method, _ in remote.calls)
+    assert hashed==list(files.values())
 
 
 @pytest.mark.parametrize('phase', ['upload_failure', 'publish_failure'])

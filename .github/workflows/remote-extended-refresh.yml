@@ -5,7 +5,6 @@ on:
       budget_seconds:
         description: Bounded extra acquisition with encrypted checkpoint publication margin
         required: false
-        default: '4800'
   schedule:
     - cron: '37 0-22/2 * * *'
 permissions:
@@ -17,7 +16,6 @@ jobs:
   refresh:
     if: github.ref == 'refs/heads/main' && vars.REMOTE_EXTENDED_ENABLED == 'true' && vars.REMOTE_EXTENDED_PARTITIONS_READY == 'true' && (github.event_name == 'workflow_dispatch' || vars.REMOTE_EXTENDED_AUTOMATIC_READY == 'true')
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
     services:
       postgres:
         image: postgres:16.10
@@ -54,7 +52,7 @@ jobs:
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY || secrets.ALPHA_VANTAGE_API_KEY }}
           FSC_ISSUANCE_SERVICE_KEY: ${{ secrets.FSC_ISSUANCE_SERVICE_KEY }}
           FSC_RIGHTS_SERVICE_KEY: ${{ secrets.FSC_RIGHTS_SERVICE_KEY }}
-          BUDGET_SECONDS: ${{ inputs.budget_seconds || '4800' }}
+          BUDGET_SECONDS: ${{ inputs.budget_seconds }}
         run: |
           umask 077
           python scripts/remote_extended_launcher.py

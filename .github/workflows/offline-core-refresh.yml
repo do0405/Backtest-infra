@@ -4,7 +4,6 @@ on:
     inputs:
       budget_seconds:
         description: Bounded acquisition time with checkpoint export margin
-        default: '5400'
         required: false
   schedule:
     - cron: '13 0-22/2 * * *'
@@ -17,7 +16,6 @@ jobs:
   refresh:
     if: github.ref == 'refs/heads/main' && vars.OFFLINE_CORE_ENABLED == 'true' && vars.OFFLINE_QUOTA_PARTITIONS_READY == 'true' && github.event.repository.private == false
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
     permissions:
       contents: write
       actions: read
@@ -42,7 +40,7 @@ jobs:
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-          BUDGET_SECONDS: ${{ inputs.budget_seconds || '5400' }}
+          BUDGET_SECONDS: ${{ inputs.budget_seconds }}
         run: python scripts/offline_runtime_launcher.py
       - name: Preserve pending delta if publication is deferred or interrupted
         if: always() && (steps.capture.outcome != 'success' || steps.capture.outputs.publication_state == 'deferred' || steps.capture.outputs.source_index == 'deferred' || steps.capture.outputs.pending_cleanup == 'deferred')

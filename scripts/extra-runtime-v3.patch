@@ -1,0 +1,61 @@
+--- a/scripts/remote_extended_cycle.py
++++ b/scripts/remote_extended_cycle.py
+@@ -106,11 +106,12 @@
+ 
+ 
+ def main(argv=None):
+-    acquisition_deadline=time.monotonic()+100*60
++    hosted_deadline=os.environ.get('BACKTEST_ACQUISITION_DEADLINE')
++    acquisition_deadline=float(hosted_deadline) if hosted_deadline else time.monotonic()+100*60
+     parser=argparse.ArgumentParser();parser.add_argument('--work',required=True,type=Path)
+-    parser.add_argument('--budget-seconds',type=int,default=4800)
++    parser.add_argument('--budget-seconds',type=int)
+     args=parser.parse_args(argv)
+-    if not 30<=args.budget_seconds<=4800:raise ValueError('bounded extra-source batch required')
++    if args.budget_seconds is not None and args.budget_seconds<30:raise ValueError('capture override must be at least 30 seconds')
+     configuration=json.loads(os.environ['REMOTE_EXTENDED_OWNERSHIP']);validate_ownership(configuration)
+     if configuration.get('version')!=2 or configuration['owner_id']!='extra-forward-v1':raise ValueError('explicit extra forward ownership required')
+     os.environ['BACKTEST_CREDENTIALS_ENV_ONLY']='1'
+@@ -136,6 +137,8 @@
+             decrypt_file(asset,work/name,key=key,binding=f"{stream}:{prior['start_sequence']}:{name}",record=prior['files'][name+'.enc'])
+         checkpoint=read_state(work/'state.json.gz');restore(work/'resume.zip',work/'resume-incoming',2*1024**3)
+         previous=prior['head']['bundle_id'];sequence=prior['end_sequence']+1;prior_hash=digest(path);prior_tag=release['tag_name']
++    collection_seconds=max(0,int(acquisition_deadline-time.monotonic())) if hosted_deadline else 4800
++    if args.budget_seconds is not None:collection_seconds=min(collection_seconds,args.budget_seconds)
+     task_binding=make_binding(configuration,stream,start_sequence=sequence)
+     checkpoint,prior_task_archive=restore_task_state(gh,repo,releases,configuration,prior,checkpoint,work,key=key)
+     if checkpoint.get('handoff_id')!=configuration['handoff_id'] or checkpoint.get('forward_start')!=configuration['forward_start']:
+@@ -214,8 +217,8 @@
+         with raw_identity_registration(archive):
+             result=run_cycle(engine,raw,ownership=configuration,planned_jobs=partial(forward_jobs,engine,configuration,as_of=cycle_as_of),
+                 incoming_bundles=[],output_root=work/'outgoing',transport_root=store,stream_id=stream,sequence=sequence,
+-                checkpoint=checkpoint,budget_seconds=args.budget_seconds,max_private_bytes=MAX_PRIVATE_ASSET,
+-                previous_bundle_id=previous,source_handlers=partial(run_owned_handlers,resume_resolver=resolver),source_handler_budget_seconds=args.budget_seconds,
++                checkpoint=checkpoint,budget_seconds=collection_seconds,max_private_bytes=MAX_PRIVATE_ASSET,
++                previous_bundle_id=previous,source_handlers=partial(run_owned_handlers,resume_resolver=resolver),source_handler_budget_seconds=collection_seconds,
+                 rate_admission=lambda session:configure_rate_partitions(session,allowance,fsc_allowance=fsc_allowance,binding_id=configuration['handoff_id']),postprocess=None,
+                 task_archive_output_root=work/'task-archive-output',price_as_of=cycle_as_of,
+                 acquisition_deadline=acquisition_deadline)
+--- a/src/backtest_data/remote/worker.py
++++ b/src/backtest_data/remote/worker.py
+@@ -32,7 +32,8 @@
+               task_archive_input_root=None,task_archive_output_root=None,task_archive_input_sequence=None,
+               price_as_of=None):
+     slots = validate_ownership(ownership)
+-    if not 0 <= budget_seconds <= 14400 or budget_seconds==0 and acquisition_deadline is None:
++    if (not math.isfinite(budget_seconds) or budget_seconds < 0
++            or acquisition_deadline is None and not 0 < budget_seconds <= 14400):
+         raise ValueError("bounded remote execution window required")
+     if acquisition_deadline is not None and not math.isfinite(acquisition_deadline):
+         raise ValueError('finite acquisition deadline required')
+--- a/src/backtest_data/remote/source_handlers.py
++++ b/src/backtest_data/remote/source_handlers.py
+@@ -44,7 +44,7 @@
+ 
+ 
+ def _budget(value):
+-    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not 0<value<=14400:
++    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0:
+         raise ValueError('positive bounded source execution budget required')
+     return value
+ 

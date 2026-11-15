@@ -93,7 +93,11 @@ def github(gh, endpoint, *, method='GET', body=None, file=None,
     raise AssertionError('bounded GitHub attempt loop')
 
 
-def _verify(release, original, files, *, published=False):
+def _file_receipts(files):
+    return {name: (len(content), 'sha256:' + sha256(content).hexdigest()) for name, content in files.items()}
+
+
+def _verify(release, original, files, *, published=False, receipts=None):
     if (release.get('id') != original['id'] or release.get('tag_name') != original['tag_name'] or
             release.get('prerelease') is not False or
             release.get('draft') is not True and not published):
@@ -103,11 +107,12 @@ def _verify(release, original, files, *, published=False):
     names = [value.get('name') for value in assets]
     if len(set(names)) != len(names) or set(names) - set(files):
         raise ValueError('unexpected or duplicate draft assets; preserved for review')
+    if receipts is None: receipts = _file_receipts({name: files[name] for name in names})
     for value in assets:
-        content = files[value['name']]
+        size, digest = receipts[value['name']]
         if (type(value.get('id')) is not int or value['id'] <= 0 or
-                value.get('state') != 'uploaded' or value.get('size') != len(content) or
-                value.get('digest') != 'sha256:' + sha256(content).hexdigest()):
+                value.get('state') != 'uploaded' or value.get('size') != size or
+                value.get('digest') != digest):
             raise ValueError('draft asset hash mismatch; original asset preserved')
     return set(names)
 
@@ -123,15 +128,20 @@ def publish_files(api, repository, release, files, work, *, sleep=time.sleep, co
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     endpoint = f'repos/{repository}/releases/{release["id"]}'
+    receipts = _file_receipts(files)
+
+    def verify(current, *, published=False):
+        return _verify(current, release, files, published=published, receipts=receipts)
+
     current = api(endpoint)
-    existing = _verify(current, release, files)
+    existing = verify(current)
     for name in [key for key in files if key != commit_name] + [commit_name]:
         if name in existing: continue
         path = work / name
         path.write_bytes(files[name])
         for attempt in range(4):
             current = api(endpoint)
-            existing = _verify(current, release, files)
+            existing = verify(current)
             if name in existing: break
             try:
                 api(f'https://uploads.github.com/repos/{repository}/releases/{release["id"]}/assets?name=' +
@@ -139,32 +149,32 @@ def publish_files(api, repository, release, files, work, *, sleep=time.sleep, co
             except GitHubError as exc:
                 # Even the final failed response can have accepted the bytes.
                 current = api(endpoint)
-                if name in _verify(current, release, files): break
+                if name in verify(current): break
                 if not exc.retryable or attempt == 3: raise
                 sleep(max(2 ** (attempt + 1), exc.retry_after or 0))
                 continue
             current = api(endpoint)
-            if name not in _verify(current, release, files):
+            if name not in verify(current):
                 raise ValueError('uploaded asset readback required')
             break
     current = api(endpoint)
-    if _verify(current, release, files) != set(files): raise ValueError('complete draft readback required')
+    if verify(current) != set(files): raise ValueError('complete draft readback required')
     if not publish: return current
     for attempt in range(4):
         try:
             api(endpoint, method='PATCH', body={'draft': False, 'make_latest': 'false'})
         except GitHubError as exc:
             current = api(endpoint)
-            _verify(current, release, files, published=True)
+            verified = verify(current, published=True)
             if current.get('draft') is False:
-                if _verify(current, release, files, published=True) != set(files):
+                if verified != set(files):
                     raise ValueError('complete published asset readback required')
                 return current
             if not exc.retryable or attempt == 3: raise
             sleep(max(2 ** (attempt + 1), exc.retry_after or 0))
             continue
         current = api(endpoint)
-        if _verify(current, release, files, published=True) != set(files) or current.get('draft') is not False:
+        if verify(current, published=True) != set(files) or current.get('draft') is not False:
             raise ValueError('published release readback required')
         return current
     raise AssertionError('bounded publication attempt loop')

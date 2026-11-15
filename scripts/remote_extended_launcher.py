@@ -7,9 +7,9 @@ import subprocess
 import sys
 
 if __package__:
-    from .collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime
+    from .collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime, hosted_collection_deadline
 else:
-    from collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime
+    from collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime, hosted_collection_deadline
 
 
 class LaunchError(RuntimeError):
@@ -29,6 +29,7 @@ def command(stage, arguments, **kwargs):
 
 
 def main():
+    deadline=hosted_collection_deadline()
     if os.environ.get('EXTRA_AUDIT_PREVIOUS_SEQUENCE'):
         raise ValueError('historical audit is not supported by the production collector')
     config = bind_runtime(json.loads(os.environ['REMOTE_EXTENDED_OWNERSHIP']), 'extra')
@@ -44,6 +45,7 @@ def main():
         **os.environ,
         'REMOTE_EXTENDED_OWNERSHIP': json.dumps(config),
         'BACKTEST_REAL_GH': real_gh,
+        'BACKTEST_ACQUISITION_DEADLINE': str(deadline),
         'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
     }
     release=json.loads(command('release_lookup', ['gh','api',f"repos/{repo}/releases/tags/{config['runtime_tag']}"]))
@@ -61,8 +63,8 @@ def main():
     command('install_runtime', [sys.executable,'-m','pip','install','--no-deps','--no-build-isolation','-e',str(runtime)])
     command('check_dependencies', [sys.executable,'-m','pip','check'])
     command('migrate_database', [sys.executable,'-m','alembic','upgrade','head'],cwd=runtime)
-    arguments = [sys.executable, str(runtime/'scripts/remote_extended_cycle.py'), '--work', str(root/'capture'),
-                 '--budget-seconds', os.environ.get('BUDGET_SECONDS', '4800')]
+    arguments = [sys.executable, str(runtime/'scripts/remote_extended_cycle.py'), '--work', str(root/'capture')]
+    if budget:=os.environ.get('BUDGET_SECONDS'):arguments.extend(('--budget-seconds',budget))
     return subprocess.run(arguments,cwd=runtime,env=env).returncode
 
 

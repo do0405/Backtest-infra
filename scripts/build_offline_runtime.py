@@ -16,13 +16,15 @@ else:
 SCRIPTS = Path(__file__).resolve().parent
 BUILDS = {
     'core': {
-        'base_sha256': 'd5dae42ca9e222d1b4f12d647e4a10d4c04fdf843a2cd430bac8e3931a4dac96',
-        'patch': 'offline-runtime-v11.patch',
+        'base_tag': 'offline-core-runtime-v11-20261115',
+        'base_sha256': '4460f55c1fb10ad443ed2c9f28688cd2ef945d24b4c65bd707ffcb86accb9091',
+        'patch': 'offline-runtime-v12.patch',
         'helpers': ('offline_publication.py', 'offline_outbox.py'),
     },
     'extra': {
-        'base_sha256': '94adf2ef27ae16bbf2806fb8ab09dee5a38f03986a880a19af57922c892a0dba',
-        'patch': 'extra-task-archive-v9.patch',
+        'base_tag': 'extra-source-runtime-v2-20261113',
+        'base_sha256': '43305cfb68485104132cec546b34660595061d4ba4bbc2424c2b13bfa41d6a14',
+        'patch': 'extra-runtime-v3.patch',
         'helpers': (),
         'hosted_scripts': {'remote_extended_cycle.py', 'remote-extended-requirements.txt', 'remote-requirements.txt'},
     },
@@ -65,23 +67,35 @@ def build(base, output, *, stream='core'):
 
 
 
-def verify_published_runtime(pin):
-    url = 'https://github.com/do0405/Backtest-infra/releases/download/' + pin['runtime_tag'] + '/runtime.zip'
+def download_runtime(tag):
+    url = 'https://github.com/do0405/Backtest-infra/releases/download/' + tag + '/runtime.zip'
     with urlopen(url, timeout=60) as response:
         content = response.read(MAX_ARCHIVE_BYTES)
-    if not 0 < len(content) < MAX_ARCHIVE_BYTES or sha256(content).hexdigest() != pin['runtime_sha256']:
+    if not 0 < len(content) < MAX_ARCHIVE_BYTES:
+        raise ValueError('bounded runtime download required')
+    return content
+
+
+def verify_published_runtime(pin):
+    if sha256(download_runtime(pin['runtime_tag'])).hexdigest() != pin['runtime_sha256']:
         raise ValueError('published runtime asset must match the reviewed pin')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stream', choices=BUILDS, default='core')
-    parser.add_argument('--base', type=Path, required=True)
+    parser.add_argument('--base', type=Path, help='Use a local copy of the same pinned build input')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--verify-and-extract', type=Path)
     parser.add_argument('--verify-published', action='store_true')
     args = parser.parse_args()
-    print(build(args.base, args.output, stream=args.stream))
+    if args.base is not None:
+        print(build(args.base, args.output, stream=args.stream))
+    else:
+        with TemporaryDirectory(prefix='runtime-base-') as temporary:
+            base=Path(temporary)/'runtime.zip'
+            base.write_bytes(download_runtime(BUILDS[args.stream]['base_tag']))
+            print(build(base, args.output, stream=args.stream))
     if args.verify_and_extract is not None or args.verify_published:
         pin = bind_runtime({}, args.stream)
         if args.verify_and_extract is not None:

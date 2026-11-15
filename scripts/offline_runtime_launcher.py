@@ -9,9 +9,9 @@ import time
 
 
 if __package__:
-    from .collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime
+    from .collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime, hosted_collection_deadline
 else:
-    from collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime
+    from collection_runtime import MAX_ARCHIVE_BYTES, bind_runtime, extract_runtime, hosted_collection_deadline
 
 
 def github(arguments, output=None):
@@ -37,6 +37,7 @@ def github(arguments, output=None):
 
 
 def main():
+    deadline=hosted_collection_deadline()
     config = bind_runtime(json.loads(os.environ['OFFLINE_CONFIGURATION']), 'core')
     repo=os.environ['REPOSITORY']
     directory=Path(os.environ['RUNNER_TEMP'])/'offline-isolated-runtime';directory.mkdir()
@@ -48,8 +49,9 @@ def main():
     runtime=directory/'source'
     extract_runtime(archive,runtime,config['runtime_sha256'])
     subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check',str(runtime)],check=True)
-    result=subprocess.run([sys.executable,str(runtime/'scripts/offline_refresh.py'),'--work',str(directory/'capture'),
-                           '--budget-seconds',os.environ.get('BUDGET_SECONDS','5400')])
+    arguments=[sys.executable,str(runtime/'scripts/offline_refresh.py'),'--work',str(directory/'capture')]
+    if budget:=os.environ.get('BUDGET_SECONDS'):arguments.extend(('--budget-seconds',budget))
+    result=subprocess.run(arguments,env={**os.environ,'BACKTEST_ACQUISITION_DEADLINE':str(deadline)})
     return result.returncode
 
 

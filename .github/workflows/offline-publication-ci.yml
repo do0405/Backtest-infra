@@ -6,7 +6,7 @@ on:
       - 'scripts/offline*'
       - 'scripts/build_offline_runtime.py'
       - 'scripts/collection_runtime.py'
-      - 'scripts/extra-runtime.json'
+      - 'scripts/extra-runtime*'
       - 'scripts/retry_release_asset.py'
       - 'tests/unit/test_remote_releases.py'
       - 'tests/unit/test_remote_schedule.py'
@@ -24,7 +24,7 @@ on:
       - 'scripts/offline*'
       - 'scripts/build_offline_runtime.py'
       - 'scripts/collection_runtime.py'
-      - 'scripts/extra-runtime.json'
+      - 'scripts/extra-runtime*'
       - 'scripts/retry_release_asset.py'
       - 'tests/unit/test_remote_releases.py'
       - 'tests/unit/test_remote_schedule.py'
@@ -51,15 +51,9 @@ jobs:
           python-version: '3.13'
       - name: Build and verify both published runtime pins
         run: |
-          curl --fail --silent --show-error --location --retry 3 --max-time 60 \
-            https://github.com/do0405/Backtest-infra/releases/download/offline-core-runtime-v10-20261113/runtime.zip \
-            -o "$RUNNER_TEMP/core-base.zip"
-          curl --fail --silent --show-error --location --retry 3 --max-time 60 \
-            https://github.com/do0405/Backtest-infra/releases/download/extra-task-archive-v8-20261014-94adf2ef27ae/runtime.zip \
-            -o "$RUNNER_TEMP/extra-base.zip"
-          python scripts/build_offline_runtime.py --stream core --base "$RUNNER_TEMP/core-base.zip" \
+          python scripts/build_offline_runtime.py --stream core \
             --output "$RUNNER_TEMP/core.zip" --verify-and-extract "$RUNNER_TEMP/core" --verify-published
-          python scripts/build_offline_runtime.py --stream extra --base "$RUNNER_TEMP/extra-base.zip" \
+          python scripts/build_offline_runtime.py --stream extra \
             --output "$RUNNER_TEMP/extra.zip" --verify-and-extract "$RUNNER_TEMP/extra" --verify-published
       - name: Install verification dependencies
         run: python -m pip install . pytest==8.4.2 cryptography==50.0.2 cffi==2.1.1 pycparser==3.0

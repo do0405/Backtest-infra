@@ -4,11 +4,14 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import time
 import zipfile
 
 
 MAX_ARCHIVE_BYTES = 64 * 1024**2
 MAX_EXPANDED_BYTES = 256 * 1024**2
+HOSTED_JOB_SECONDS = 6 * 60 * 60
+CHECKPOINT_RESERVE_SECONDS = 15 * 60
 PINS = {
     'core': ('offline-runtime.json', 'offline_runtime_pin_v1', r'offline-core-runtime-v\d+-\d{8}'),
     'extra': ('extra-runtime.json', 'extra_runtime_pin_v1', r'extra-source-runtime-v\d+-\d{8}'),
@@ -17,6 +20,11 @@ PINS = {
 
 def pin_path(stream):
     return Path(__file__).with_name(PINS[stream][0])
+
+
+def hosted_collection_deadline():
+    """Leave time for export and upload before the hosted runner stops."""
+    return time.monotonic() + HOSTED_JOB_SECONDS - CHECKPOINT_RESERVE_SECONDS
 
 
 def bind_runtime(configuration, stream, path=None):
