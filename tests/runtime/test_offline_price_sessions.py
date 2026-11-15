@@ -124,6 +124,57 @@ def test_legacy_cursor_resumes_the_original_provider_symbol(acquisition):
     assert client.calls[0][3] == 'existing'
 
 
+@pytest.mark.parametrize('legacy',[False,True])
+def test_new_small_price_batches_and_legacy_cursor_keep_their_members(acquisition,legacy):
+    from uuid import UUID
+    from backtest_data.remote.codec import PaginationCursor,dumps,loads
+    members=[dict(entity_id=str(UUID(int=i+1)),symbol='S'+str(i)) for i in range(105)]
+    cycle=dict(start='2026-11-23',end='2026-11-24',offset=0,request_anchor=NOW.isoformat())
+    state={'cycle':cycle}
+    width=100 if legacy else 24
+    if legacy:
+        cycle.update(cursor=PaginationCursor('old'),active_symbols=[m['symbol'] for m in members[:width]])
+    else:
+        acquisition._run_primary_price(state,members,Bars(({},'next')),NOW,'cycle',cycle)
+    state=loads(dumps(state))
+    client=Bars(({},None),({},None))
+    captures=acquisition._run_primary_price(state,members,client,NOW,'cycle',state['cycle'])
+    assert len(captures)==width
+    assert client.calls[0][0]==[m['symbol'] for m in members[:width]]
+    assert client.calls[0][3]==('old' if legacy else 'next')
+    assert state['cycle']['offset']==width
+    acquisition._run_primary_price(state,members,client,NOW,'cycle',state['cycle'])
+    assert client.calls[1][0]==[m['symbol'] for m in members[width:width+24]]
+
+
+def test_dart_instance_budget_resumes_after_serializing_committed_state(acquisition,monkeypatch):
+    from backtest_data.offline.contracts import canonical_bytes,make_capture
+    from backtest_data.remote.codec import dumps,loads
+    member=MEMBERS[0]
+    catalog=dict(output_end='2026-10-07',target_count=17758,catalog_sha256='a'*64,dart_issuers=[member])
+    state=acquisition.new_state(catalog)
+    filing=dict(member=member,filing=dict(rcept_no='20261115000001',report_nm='분기보고서'))
+    state['sources']['opendart']['cycle']=dict(start='2026-11-01',end='2026-11-20',offset=1,pending=[filing])
+    calls=[]
+    bodies=[canonical_bytes(dict(version=1,format='offline_extraction_v1',source_content_hash=c*64,result={}))
+        for c in ('a','b')]
+    def fetch(item,client):
+        calls.append(item['filing']['rcept_no'])
+        return [(make_capture(source='opendart',kind='dart_extraction',entity_id=member['entity_id'],
+            captured_at=NOW,content=body,metadata={'instance_key':instance}),body)
+            for instance,body in zip(('structured:CFS','structured:OFS'),bodies)]
+    monkeypatch.setattr(acquisition,'_dart_filing',fetch)
+    clients={'opendart':object()}
+    state, first=acquisition.acquire_tick(catalog,state,clients,now=NOW,max_steps=2,max_capture_bytes=len(bodies[0]))
+    assert state['provider_status']['opendart']['status']=='storage_deferred'
+    assert state['sources']['opendart']['cycle']['pending'][0]['dart_instances']['next']==1
+    state, second=acquisition.acquire_tick(catalog,loads(dumps(state)),clients,now=NOW,max_steps=1,max_capture_bytes=len(bodies[0]))
+    assert 'cycle' not in state['sources']['opendart']
+    assert state['sources']['opendart']['watermark']=='2026-11-20'
+    assert [capture['metadata']['instance_key'] for capture,_ in first+second]==['structured:CFS','structured:OFS']
+    assert calls==['20261115000001']*2
+
+
 def test_dated_skk_alias_requires_the_exact_issue_and_effective_day(acquisition):
     from backtest_data.prices.adapters.alpaca import AlpacaDailyRequest
 

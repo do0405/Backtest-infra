@@ -1,0 +1,165 @@
+--- a/src/backtest_data/offline/acquisition.py
++++ b/src/backtest_data/offline/acquisition.py
+@@ -22,6 +22,8 @@
+ 
+ SOURCES = ('alpaca', 'sec', 'opendart')
+ MEMBERS = {'alpaca': 'us_prices', 'sec': 'sec_issuers', 'opendart': 'dart_issuers'}
++PRICE_BATCH_SIZE = 24
++LEGACY_PRICE_BATCH_SIZE = 100
+ 
+ 
+ def ready_day(source, now):
+@@ -87,10 +89,19 @@
+             if datetime.fromisoformat(value['retry_at']) <= now]
+ 
+ 
+-def _collect_financial_filing(state, item, source, client, now):
++def _collect_financial_filing(state, item, source, client, now, *, dart_cache=None):
+     """Isolate one unsupported/invalid extraction; transport errors stay visible."""
+     try:
+-        captures = (_sec_filing if source == 'sec' else _dart_filing)(item, client)
++        if source == 'sec':
++            captures = _sec_filing(item, client)
++        else:
++            key = (item['member']['entity_id'], item['filing']['rcept_no'], item['filing']['report_nm'])
++            if dart_cache is None:
++                dart_cache = {}
++            if key not in dart_cache:
++                dart_cache.clear()
++                dart_cache[key] = _dart_filing(item, client)
++            captures = _next_dart_instance(item, dart_cache[key])
+     except ValueError as exc:
+         # Discovery validation happens outside this boundary. Keep the exact
+         # filing, never an exception body or any partially constructed captures.
+@@ -101,12 +112,12 @@
+     return captures
+ 
+ 
+-def _retry_filing(state, source, client, now):
++def _retry_filing(state, source, client, now, *, dart_cache=None):
+     due = _due_filings(state, now)
+     if not due: return None
+     key, value = min(due, key=lambda pair: (pair[1]['retry_at'], pair[0]))
+-    captures = _collect_financial_filing(state, value['item'], source, client, now)
+-    if captures: del state['deferred_filings'][key]
++    captures = _collect_financial_filing(state, value['item'], source, client, now, dart_cache=dart_cache)
++    if captures and 'dart_instances' not in value['item']: del state['deferred_filings'][key]
+     return captures
+ 
+ 
+@@ -118,14 +129,14 @@
+     return _financial_primary_has_work(state, source, now) or bool(_due_filings(state, now))
+ 
+ 
+-def _financial_step(state, members, client, now, source, primary):
++def _financial_step(state, members, client, now, source, primary, *, dart_cache=None):
+     """Persist three fresh turns per due retry across independent runners."""
+     fresh = _financial_primary_has_work(state, source, now)
+     turns = state.get('financial_primary_steps', 0)
+     if type(turns) is not int or not 0 <= turns <= 3:
+         raise ValueError('bounded financial fairness counter required')
+     if _due_filings(state, now) and (not fresh or turns == 3):
+-        captures = _retry_filing(state, source, client, now)
++        captures = _retry_filing(state, source, client, now, dart_cache=dart_cache)
+         state['financial_primary_steps'] = 0
+         return captures
+     if not fresh:
+@@ -378,7 +389,13 @@
+ 
+ 
+ def _run_primary_price(state, members, client, now, key, cycle):
+-    batch = members[cycle['offset']:cycle['offset'] + 100]
++    width = cycle.get('batch_size')
++    if width is None:
++        width = LEGACY_PRICE_BATCH_SIZE if cycle.get('cursor') is not None else PRICE_BATCH_SIZE
++    if type(width) is not int or not 1 <= width <= LEGACY_PRICE_BATCH_SIZE:
++        raise ValueError('invalid price checkpoint batch size')
++    cycle['batch_size'] = width
++    batch = members[cycle['offset']:cycle['offset'] + width]
+     eligible = _primary_price_routes(state, batch, cycle, now)
+     captures, exhausted, observed, excluded = _price_page(cycle, eligible, client, state,
+         mode='recent_correction' if key == 'recent_cycle' else 'forward')
+@@ -410,7 +427,7 @@
+         cycle['offset'] += len(batch)
+         # All primary batches in this cycle retain its original request anchor.
+         for field in ('seen_symbols', 'active_symbols', 'excluded_symbols', 'excluded_reasons',
+-                      'observed_price_days', 'legacy_price_prefix', 'price_request_symbols'):
++                      'observed_price_days', 'legacy_price_prefix', 'price_request_symbols','batch_size'):
+             cycle.pop(field, None)
+     if exhausted and cycle['offset'] >= len(members):
+         if key == 'recent_cycle':
+@@ -765,16 +782,40 @@
+     return captures
+ 
+ 
+-def _dart_step(state, members, client, now):
+-    return _financial_step(state, members, client, now, 'opendart', _dart_primary_step)
+-
+-
+-def _dart_primary_step(state, members, client, now):
++def _next_dart_instance(item, captures):
++    """Advance one verified accession instance per admitted capture."""
++    if not captures:
++        return []
++    from .contracts import canonical_bytes
++    identity = sha256(canonical_bytes([{'content_sha256': value['content_sha256'],
++        'metadata': value['metadata']} for value, _ in captures])).hexdigest()
++    checkpoint = item.get('dart_instances')
++    index = 0
++    if checkpoint and checkpoint['sha256'] == identity:
++        index = checkpoint['next']
++    if type(index) is not int or not 0 <= index < len(captures):
++        raise ValueError('invalid OpenDART instance checkpoint')
++    if index + 1 == len(captures):
++        item.pop('dart_instances', None)
++    else:
++        item['dart_instances'] = {'sha256': identity, 'next': index + 1}
++    return [captures[index]]
++
++
++def _dart_step(state, members, client, now, *, dart_cache=None):
++    def primary(state, members, client, now):
++        return _dart_primary_step(state, members, client, now, dart_cache=dart_cache)
++    return _financial_step(state, members, client, now, 'opendart', primary, dart_cache=dart_cache)
++
++
++def _dart_primary_step(state, members, client, now, *, dart_cache=None):
+     cycle = begin_cycle(state, 'opendart', now)
+     if cycle is None: return []
+     if cycle['pending']:
+-        captures = _collect_financial_filing(state, cycle['pending'][0], 'opendart', client, now)
+-        cycle['pending'].pop(0)
++        item = cycle['pending'][0]
++        captures = _collect_financial_filing(state, item, 'opendart', client, now, dart_cache=dart_cache)
++        if not captures or 'dart_instances' not in item:
++            cycle['pending'].pop(0)
+     else:
+         if getattr(client, 'global_dart', False):
+             by_code = {member['identifier'][5:]: member for member in members}
+@@ -830,7 +871,8 @@
+         value['forward_start'] = forward_start
+     captures, blocked, content_hashes, total = [], set(), set(), 0
+     manifest_total = 0
+-    functions = {'alpaca': _alpaca_step, 'sec': _sec_step, 'opendart': _dart_step}
++    from functools import partial
++    functions = {'alpaca': _alpaca_step, 'sec': _sec_step, 'opendart': partial(_dart_step,dart_cache={})}
+     available = [source for source in SOURCES if source in clients and catalog.get(MEMBERS[source])]
+     for step in range(max_steps):
+         if not available or deadline is not None and time.monotonic() >= deadline: break
+@@ -847,12 +889,14 @@
+                 for capture, _ in values)
+             if manifest_total + manifest_added > max_capture_manifest_bytes:
+                 result['sources'][source] = prior
+-                result['provider_status'][source] = {'status': 'manifest_deferred'}
++                result['provider_status'][source] = {'status': 'manifest_item_too_large'
++                    if manifest_added > max_capture_manifest_bytes else 'manifest_deferred'}
+                 blocked.add(source)
+                 continue
+             if added + total > max_capture_bytes:
+                 result['sources'][source] = prior
+-                result['provider_status'][source] = {'status': 'storage_deferred'}
++                result['provider_status'][source] = {'status': 'storage_item_too_large'
++                    if added > max_capture_bytes else 'storage_deferred'}
+                 blocked.add(source)
+                 continue
+             captures.extend(values); total += added; content_hashes.update(additions)
