@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-11-15T03:47:18.083536+00:00",
+  "checked_at": "2026-11-15T03:55:54.646986+00:00",
   "collection_outcome": "success",
   "core_publication": {
     "pending_cleanup": "verified",
@@ -9,12 +9,12 @@
   "coverage_complete": false,
   "event": "workflow_dispatch",
   "format": "collection_health_v1",
-  "head_sha": "c34e21886c400200de128c0fe5023632ae3da394",
+  "head_sha": "f1134d261c124b88536d14c3b99d6d94791ed9d0",
   "latest_data_release": {
-    "commit_sha256": "212c7f27659e6a31d29e9f011c552667badc0076464fe0af367c6f01f9d217be",
-    "tag": "offline-core-forward-v1-000000160"
+    "commit_sha256": "f958ce578a3570ff046cdd8f23b5d0cb332cbe52d4b14a6f6ae7ada1a625e009",
+    "tag": "offline-core-forward-v1-000000161"
   },
-  "observed_by_run_id": 43668622586,
+  "observed_by_run_id": 43674048050,
   "requires_user": false,
   "run_attempt": 1,
   "workflows": {
