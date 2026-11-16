@@ -1,20 +1,15 @@
 {
-  "checked_at": "2026-11-16T07:07:16.992252+00:00",
-  "collection_outcome": "success",
-  "core_publication": {
-    "pending_cleanup": "verified",
-    "source_index": "verified",
-    "state": "committed"
-  },
+  "checked_at": "2026-11-16T18:44:38.985411+00:00",
+  "collection_outcome": "not_run",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "9aa5ca147fac86b67e35f921d9cb63eb4e2b687a",
+  "head_sha": "250be9fcb7b355f930d30bfd5d7813193bcebb40",
   "latest_data_release": {
     "commit_sha256": "762351ef68027a245854198e1dab5defaeadd707a71d6d4450bd165ee073baea",
     "tag": "offline-core-forward-v1-000000165"
   },
-  "observed_by_run_id": 43816276316,
+  "observed_by_run_id": 43932005636,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
@@ -22,14 +17,14 @@
       "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-15T22:46:19Z",
-        "id": 43771130865,
+        "created_at": "2026-11-16T06:22:10Z",
+        "id": 43816276316,
         "status": "completed"
       },
       "latest_observed_schedule": {
         "conclusion": null,
-        "created_at": "2026-11-16T06:22:10Z",
-        "id": 43816276316,
+        "created_at": "2026-11-16T18:29:32Z",
+        "id": 43929363301,
         "status": "in_progress"
       },
       "operator_enabled": true,
@@ -56,14 +51,14 @@
       "attention": "schedule_stale",
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-15T23:06:51Z",
-        "id": 43773012249,
+        "created_at": "2026-11-16T07:10:54Z",
+        "id": 43821973539,
         "status": "completed"
       },
       "latest_observed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-15T23:06:51Z",
-        "id": 43773012249,
+        "created_at": "2026-11-16T07:10:54Z",
+        "id": 43821973539,
         "status": "completed"
       },
       "operator_enabled": true,
