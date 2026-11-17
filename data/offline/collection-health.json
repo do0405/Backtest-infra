@@ -1,35 +1,30 @@
 {
-  "checked_at": "2026-11-16T20:42:33.862100+00:00",
-  "collection_outcome": "failure",
-  "core_publication": {
-    "pending_cleanup": null,
-    "source_index": null,
-    "state": "failed"
-  },
+  "checked_at": "2026-11-17T03:01:59.287369+00:00",
+  "collection_outcome": "not_run",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "250be9fcb7b355f930d30bfd5d7813193bcebb40",
+  "head_sha": "f95f1910aa16c1adb8e7811410e587097f246ad1",
   "latest_data_release": {
     "commit_sha256": "762351ef68027a245854198e1dab5defaeadd707a71d6d4450bd165ee073baea",
     "tag": "offline-core-forward-v1-000000165"
   },
-  "observed_by_run_id": 43929363301,
-  "requires_user": false,
+  "observed_by_run_id": 44007228866,
+  "requires_user": true,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
-      "attention": null,
+      "attention": "schedule_unsuccessful",
       "latest_completed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-16T06:22:10Z",
-        "id": 43816276316,
+        "conclusion": "failure",
+        "created_at": "2026-11-16T18:29:32Z",
+        "id": 43929363301,
         "status": "completed"
       },
       "latest_observed_schedule": {
         "conclusion": null,
-        "created_at": "2026-11-16T18:29:32Z",
-        "id": 43929363301,
+        "created_at": "2026-11-17T02:54:25Z",
+        "id": 44006354995,
         "status": "in_progress"
       },
       "operator_enabled": true,
@@ -53,18 +48,18 @@
       "state": "disabled_manually"
     },
     "remote-extended-refresh.yml": {
-      "attention": null,
+      "attention": "schedule_stale",
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-16T07:10:54Z",
-        "id": 43821973539,
+        "created_at": "2026-11-16T18:50:40Z",
+        "id": 43933080510,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": null,
+        "conclusion": "success",
         "created_at": "2026-11-16T18:50:40Z",
         "id": 43933080510,
-        "status": "in_progress"
+        "status": "completed"
       },
       "operator_enabled": true,
       "state": "active"
