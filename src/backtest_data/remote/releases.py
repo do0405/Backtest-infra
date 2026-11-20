@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import time
 import zipfile
 from datetime import datetime
 from uuid import UUID
@@ -20,18 +22,61 @@ MAX_ASSET=512*1024**2
 MAX_STATE=128*1024**2
 
 
+class GitHubOperationError(RuntimeError):
+    def __init__(self, status, operation, *, rate_limited=False, transient=False):
+        self.status, self.operation = status, operation
+        self.rate_limited, self.transient = rate_limited, transient
+        super().__init__('github_operation_failed')
+
+    def safe_details(self):
+        return {'http_status': self.status, 'operation': self.operation}
+
+    @property
+    def retryable(self):
+        return self.transient or self.rate_limited or self.status in {408,429,500,502,503,504}
+
+
+class GitHubAccessError(GitHubOperationError, ValueError):
+    pass
+
+
 def github(gh, args, *, output=None, timeout=120):
-    if output is None:
-        r=subprocess.run([str(gh),*args],capture_output=True,timeout=timeout)
-    else:
-        with Path(output).open('wb') as f:
-            r=subprocess.run([str(gh),*args],stdout=f,stderr=subprocess.PIPE,timeout=timeout)
-    if r.returncode:
-        failure=(r.stderr or b'').lower()
-        if any(v in failure for v in (b'http 401',b'http 403',b'authentication',b'permission denied')):
-            raise ValueError('github_access_requires_action')
-        raise RuntimeError('github_operation_failed')
-    return r.stdout if output is None else None
+    """Retry proven reads; preserve ambiguous writes for caller reconciliation."""
+    options = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+    implicit_post = any(value in {'--input','-f','-F','--field','--raw-field'} or
+        value.startswith(('--input=','--field=','--raw-field=')) for value in args)
+    method = 'POST' if implicit_post else 'GET'
+    for i,value in enumerate(args):
+        if value in {'--method','-X'} and i+1<len(args):method=args[i+1]
+        elif value.startswith('--method='):method=value.split('=',1)[1]
+        elif value.startswith('-X') and len(value)>2:method=value[2:]
+    read = bool(args) and args[0]=='api' and method.upper()=='GET' and not implicit_post
+    operation = 'asset_download' if output is not None else 'runtime_read' if read else 'runtime_write'
+    for attempt in range(4 if read else 1):
+        try:
+            if output is None:
+                result=subprocess.run([str(gh),*args],capture_output=True,timeout=timeout,**options)
+            else:
+                with Path(output).open('wb') as stream:
+                    result=subprocess.run([str(gh),*args],stdout=stream,stderr=subprocess.PIPE,timeout=timeout,**options)
+        except (FileNotFoundError,PermissionError) as exc:
+            raise ValueError('github_cli_unavailable') from exc
+        except (subprocess.TimeoutExpired,OSError):
+            error=GitHubOperationError(None,operation,transient=True)
+        else:
+            if not result.returncode:return result.stdout if output is None else None
+            failure=(result.stderr or b'').lower()
+            match=re.search(rb'http(?:/[\d.]+)?\s+(\d{3})',failure)
+            status=int(match[1]) if match else None
+            limited=status==403 and b'rate limit' in failure
+            if (status in {401,403} and not limited) or any(v in failure for v in (b'authentication',b'permission denied')):
+                raise GitHubAccessError(status,operation)
+            transient=status is None and any(value in failure for value in (b'i/o timeout',b'connection reset',
+                b'connection refused',b'tls handshake timeout',b'unexpected eof',b'no such host',
+                b'temporary failure in name resolution',b'network is unreachable',b'context deadline exceeded'))
+            error=GitHubOperationError(status,operation,rate_limited=limited,transient=transient)
+        if not read or not error.retryable or attempt==3:raise error
+        time.sleep(2**(attempt+1))
 
 
 def release_tag(stream, sequence, *, attempt=None):

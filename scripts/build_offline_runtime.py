@@ -22,11 +22,11 @@ BUILDS = {
         'helpers': ('offline_publication.py', 'offline_outbox.py'),
     },
     'extra': {
-        'base_tag': 'extra-source-runtime-v2-20261113',
-        'base_sha256': '43305cfb68485104132cec546b34660595061d4ba4bbc2424c2b13bfa41d6a14',
-        'patch': 'extra-runtime-v3.patch',
-        'helpers': (),
-        'hosted_scripts': {'remote_extended_cycle.py', 'remote-extended-requirements.txt', 'remote-requirements.txt'},
+        'base_tag': 'extra-source-runtime-v3-20261115',
+        'base_sha256': '6ee523f7e10ca2cf08f778aa9a72a977b1e82d45980c727d55d18512c0ec8954',
+        'patch': 'extra-runtime-v4.patch',
+        'helpers': ('offline_publication.py',),
+        'hosted_scripts': {'remote_extended_cycle.py', 'remote-extended-requirements.txt', 'remote-requirements.txt', 'offline_publication.py'},
     },
 }
 

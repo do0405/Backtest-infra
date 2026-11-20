@@ -1,0 +1,137 @@
+--- a/src/backtest_data/remote/releases.py
++++ b/src/backtest_data/remote/releases.py
+@@ -5,6 +5,8 @@
+ import re
+ import subprocess
+ import sys
++import time
++import sys
+ import zipfile
+ from datetime import datetime
+ from uuid import UUID
+@@ -20,19 +22,61 @@
+ MAX_STATE=128*1024**2
+ 
+ 
++class GitHubOperationError(RuntimeError):
++    def __init__(self, status, operation, *, rate_limited=False, transient=False):
++        self.status, self.operation = status, operation
++        self.rate_limited, self.transient = rate_limited, transient
++        super().__init__('github_operation_failed')
++
++    def safe_details(self):
++        return {'http_status': self.status, 'operation': self.operation}
++
++    @property
++    def retryable(self):
++        return self.transient or self.rate_limited or self.status in {408,429,500,502,503,504}
++
++
++class GitHubAccessError(GitHubOperationError, ValueError):
++    pass
++
++
+ def github(gh, args, *, output=None, timeout=120):
++    """Retry proven reads; preserve ambiguous writes for caller reconciliation."""
+     options = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+-    if output is None:
+-        r=subprocess.run([str(gh),*args],capture_output=True,timeout=timeout,**options)
+-    else:
+-        with Path(output).open('wb') as f:
+-            r=subprocess.run([str(gh),*args],stdout=f,stderr=subprocess.PIPE,timeout=timeout,**options)
+-    if r.returncode:
+-        failure=(r.stderr or b'').lower()
+-        if any(v in failure for v in (b'http 401',b'http 403',b'authentication',b'permission denied')):
+-            raise ValueError('github_access_requires_action')
+-        raise RuntimeError('github_operation_failed')
+-    return r.stdout if output is None else None
++    implicit_post = any(value in {'--input','-f','-F','--field','--raw-field'} or
++        value.startswith(('--input=','--field=','--raw-field=')) for value in args)
++    method = 'POST' if implicit_post else 'GET'
++    for i,value in enumerate(args):
++        if value in {'--method','-X'} and i+1<len(args):method=args[i+1]
++        elif value.startswith('--method='):method=value.split('=',1)[1]
++        elif value.startswith('-X') and len(value)>2:method=value[2:]
++    read = bool(args) and args[0]=='api' and method.upper()=='GET' and not implicit_post
++    operation = 'asset_download' if output is not None else 'runtime_read' if read else 'runtime_write'
++    for attempt in range(4 if read else 1):
++        try:
++            if output is None:
++                result=subprocess.run([str(gh),*args],capture_output=True,timeout=timeout,**options)
++            else:
++                with Path(output).open('wb') as stream:
++                    result=subprocess.run([str(gh),*args],stdout=stream,stderr=subprocess.PIPE,timeout=timeout,**options)
++        except (FileNotFoundError,PermissionError) as exc:
++            raise ValueError('github_cli_unavailable') from exc
++        except (subprocess.TimeoutExpired,OSError):
++            error=GitHubOperationError(None,operation,transient=True)
++        else:
++            if not result.returncode:return result.stdout if output is None else None
++            failure=(result.stderr or b'').lower()
++            match=re.search(rb'http(?:/[\d.]+)?\s+(\d{3})',failure)
++            status=int(match[1]) if match else None
++            limited=status==403 and b'rate limit' in failure
++            if (status in {401,403} and not limited) or any(v in failure for v in (b'authentication',b'permission denied')):
++                raise GitHubAccessError(status,operation)
++            transient=status is None and any(value in failure for value in (b'i/o timeout',b'connection reset',
++                b'connection refused',b'tls handshake timeout',b'unexpected eof',b'no such host',
++                b'temporary failure in name resolution',b'network is unreachable',b'context deadline exceeded'))
++            error=GitHubOperationError(status,operation,rate_limited=limited,transient=transient)
++        if not read or not error.retryable or attempt==3:raise error
++        time.sleep(2**(attempt+1))
+ 
+ 
+ def release_tag(stream, sequence, *, attempt=None):
+--- a/scripts/remote_extended_cycle.py
++++ b/scripts/remote_extended_cycle.py
+@@ -31,6 +31,8 @@
+ from backtest_data.remote.folder import FolderTransport
+ from backtest_data.remote.planner import validate_ownership
+ from backtest_data.remote.releases import github,inventory,download_asset,read_state,write_state,zip_store,release_tag
++from backtest_data.remote.releases import GitHubOperationError
++from offline_publication import error_details
+ from backtest_data.remote.sql import import_bundle
+ from backtest_data.remote.worker import run_cycle
+ from backtest_data.remote.source_handlers import run_owned_handlers,full_manifest_scope
+@@ -42,6 +44,18 @@
+ from backtest_data.remote.task_archive import (
+     hydrate_checkpoint, make_binding, price_backlog_before_resume, publishable_shards, restore_shards,
+ )
++
++
++def reserve_source_allowance(*args, **kwargs):
++    """An unavailable optional source never authorizes unreserved requests."""
++    try:
++        return reserve_allowance(*args, **kwargs)
++    except GitHubOperationError as exc:
++        if not exc.retryable:raise
++        source=kwargs.get('source')
++        print(json.dumps({'status':'extra_allowance_deferred',
++            'source':source if source in PARTITIONS else 'unknown', **exc.safe_details()}),flush=True)
++        return None
+ 
+ 
+ def publication_summary(head,tag,state):
+@@ -154,11 +168,11 @@
+     readiness=configuration.get('quota_partition_ready',{})
+     allowance=None;fsc_allowance=None
+     if readiness.get('alpha_vantage') is True and quota_ready(configuration,'alpha_vantage',utcnow()):
+-        allowance=reserve_allowance(gh,repo,stream,work/'alpha-allocation',source='alpha_vantage',binding_id=configuration['handoff_id'],
++        allowance=reserve_source_allowance(gh,repo,stream,work/'alpha-allocation',source='alpha_vantage',binding_id=configuration['handoff_id'],
+             run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),target='main',now=utcnow(),
+             partition=configuration.get('quota_partitions',{}).get('alpha_vantage',PARTITIONS['alpha_vantage']))
+     if readiness.get('fsc_datago') is True and quota_ready(configuration,'fsc_datago',utcnow()):
+-        fsc_allowance=reserve_allowance(gh,repo,stream,work/'fsc-allocation',source='fsc_datago',binding_id=configuration['handoff_id'],
++        fsc_allowance=reserve_source_allowance(gh,repo,stream,work/'fsc-allocation',source='fsc_datago',binding_id=configuration['handoff_id'],
+             run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),target='main',now=utcnow(),
+             partition=configuration.get('quota_partitions',{}).get('fsc_datago',PARTITIONS['fsc_datago']))
+     for slot in configuration['provider_slots']:
+@@ -273,7 +287,6 @@
+ if __name__=='__main__':
+     try:raise SystemExit(main())
+     except Exception as exc:
+-        frames=traceback.extract_tb(exc.__traceback__)
+         print(json.dumps({'status':'remote_extra_failed','error_type':type(exc).__name__,
+-            'locations':[{'file':Path(frame.filename).name,'line':frame.lineno,'function':frame.name} for frame in frames[-6:]]}))
++            **error_details(exc)}),flush=True)
+         raise SystemExit(2)
