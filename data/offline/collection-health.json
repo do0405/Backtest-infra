@@ -1,16 +1,21 @@
 {
-  "checked_at": "2026-11-19T23:08:20.777731+00:00",
-  "collection_outcome": "not_run",
+  "checked_at": "2026-11-20T04:28:33.703425+00:00",
+  "collection_outcome": "failure",
+  "core_publication": {
+    "pending_cleanup": null,
+    "source_index": null,
+    "state": "failed"
+  },
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "47d78a9149d63e539b188484991ad35341b0ae55",
+  "head_sha": "58c3372e0f09db8051f1df1f67d3ac92e7fb0079",
   "latest_data_release": {
     "commit_sha256": "c89de0e45f1b5c0582f6d80c9d04dde77ed7bf13fee1de4e5bb496babe0b4aa3",
     "tag": "offline-core-forward-v1-000000169"
   },
-  "observed_by_run_id": 44634981058,
-  "requires_user": false,
+  "observed_by_run_id": 44665817357,
+  "requires_user": true,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
@@ -22,10 +27,10 @@
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-19T20:31:23Z",
-        "id": 44609526962,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-11-20T03:09:47Z",
+        "id": 44665817357,
+        "status": "in_progress"
       },
       "operator_enabled": true,
       "state": "active"
@@ -48,18 +53,18 @@
       "state": "disabled_manually"
     },
     "remote-extended-refresh.yml": {
-      "attention": null,
+      "attention": "schedule_unsuccessful",
       "latest_completed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-19T13:48:03Z",
-        "id": 44537058223,
+        "conclusion": "failure",
+        "created_at": "2026-11-20T03:41:22Z",
+        "id": 44669411704,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": null,
-        "created_at": "2026-11-19T22:24:11Z",
-        "id": 44628281509,
-        "status": "in_progress"
+        "conclusion": "failure",
+        "created_at": "2026-11-20T03:41:22Z",
+        "id": 44669411704,
+        "status": "completed"
       },
       "operator_enabled": true,
       "state": "active"
