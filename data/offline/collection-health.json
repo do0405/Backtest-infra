@@ -1,20 +1,25 @@
 {
-  "checked_at": "2026-11-20T17:05:37.158336+00:00",
-  "collection_outcome": "not_run",
+  "checked_at": "2026-11-20T23:08:14.223125+00:00",
+  "collection_outcome": "success",
+  "core_publication": {
+    "pending_cleanup": "verified",
+    "source_index": "verified",
+    "state": "committed"
+  },
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "399dc64fb948ac76f2f32f0ece6ce4763b64fa60",
+  "head_sha": "5655bef6744092af56419abc257d50e10c604bb6",
   "latest_data_release": {
-    "commit_sha256": "addcbc0714616a8abafc482368467d88fe4387bb573a8d7abae3b0cb8c2ffef7",
-    "tag": "offline-core-forward-v1-000000170"
+    "commit_sha256": "ee2e0efc52f80324d42a0de254590de057c50ff9d254ff33f2aa1adb59bcc03e",
+    "tag": "offline-core-forward-v1-000000171"
   },
-  "observed_by_run_id": 44779862642,
+  "observed_by_run_id": 44823424951,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
-      "attention": "schedule_stale",
+      "attention": "schedule_unsuccessful",
       "latest_completed_schedule": {
         "conclusion": "failure",
         "created_at": "2026-11-20T12:51:07Z",
@@ -22,10 +27,10 @@
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "failure",
-        "created_at": "2026-11-20T12:51:07Z",
-        "id": 44739234543,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-11-20T21:47:33Z",
+        "id": 44823424951,
+        "status": "in_progress"
       },
       "operator_enabled": true,
       "state": "active"
@@ -48,17 +53,17 @@
       "state": "disabled_manually"
     },
     "remote-extended-refresh.yml": {
-      "attention": "schedule_unsuccessful",
+      "attention": null,
       "latest_completed_schedule": {
-        "conclusion": "failure",
-        "created_at": "2026-11-20T03:41:22Z",
-        "id": 44669411704,
+        "conclusion": "success",
+        "created_at": "2026-11-20T13:30:11Z",
+        "id": 44744851962,
         "status": "completed"
       },
       "latest_observed_schedule": {
         "conclusion": null,
-        "created_at": "2026-11-20T13:30:11Z",
-        "id": 44744851962,
+        "created_at": "2026-11-20T21:56:05Z",
+        "id": 44824637256,
         "status": "in_progress"
       },
       "operator_enabled": true,
