@@ -1,0 +1,128 @@
+--- a/src/backtest_data/offline/acquisition.py
++++ b/src/backtest_data/offline/acquisition.py
+@@ -870,6 +870,8 @@
+         # and legacy historical gap retries retain their original requests.
+         value['forward_start'] = forward_start
+     captures, blocked, content_hashes, total = [], set(), set(), 0
++    capture_identities = {}
++    reused_captures = 0
+     manifest_total = 0
+     from functools import partial
+     functions = {'alpaca': _alpaca_step, 'sec': _sec_step, 'opendart': partial(_dart_step,dart_cache={})}
+@@ -882,6 +884,23 @@
+         prior = deepcopy(result['sources'][source])
+         try:
+             values = functions[source](result['sources'][source], catalog[MEMBERS[source]], clients[source], now)
++            # A cached financial instance may be reached through both fresh
++            # discovery and a due retry. Preserve distinct observation clocks,
++            # but one exact capture identity needs only one archive entry.
++            unique = {}
++            replayed = 0
++            for capture, content in values:
++                identity = capture['capture_id']
++                previous = capture_identities.get(identity, unique.get(identity))
++                if previous is not None:
++                    from .contracts import validate_capture
++                    validate_capture(capture, content)
++                    if previous != (capture, content):
++                        raise ValueError('conflicting replayed capture identity')
++                    replayed += 1
++                else:
++                    unique[identity] = (capture, content)
++            values = list(unique.values())
+             additions = {capture['content_sha256']: content for capture, content in values
+                          if capture['content_sha256'] not in content_hashes}
+             added = sum(len(content) for content in additions.values())
+@@ -900,6 +919,8 @@
+                 blocked.add(source)
+                 continue
+             captures.extend(values); total += added; content_hashes.update(additions)
++            capture_identities.update(unique)
++            reused_captures += replayed
+             manifest_total += manifest_added
+             result['provider_status'][source] = {'status': 'captured', 'captures': len(values)}
+             done = not _price_has_work(result['sources'][source], now) if source == 'alpaca' else (
+@@ -914,4 +935,5 @@
+             blocked.add(source)
+     result['coverage_complete'] = False
+     result['used_capture_manifest_bytes'] = manifest_total
++    result['reused_capture_observations'] = reused_captures
+     return result, captures
+--- a/scripts/offline_refresh.py
++++ b/scripts/offline_refresh.py
+@@ -17,7 +17,7 @@
+ from backtest_data.offline.transport import GitHubCaptureTransport
+ from backtest_data.credentials import load_credentials
+ from backtest_data.remote.releases import github
+-from offline_publication import GitHubError
++from offline_publication import GitHubError, error_details
+ from offline_outbox import recover, acknowledge, remove_local, output
+ 
+ 
+@@ -65,6 +65,7 @@
+     gh=shutil.which('gh')
+     if not gh:raise ValueError('GitHub CLI required')
+     args.work.mkdir(parents=True,exist_ok=True)
++    progress['phase'] = 'bootstrap'
+     bootstrap=json.loads(github(gh,['api',f"repos/{repo}/releases/tags/{configuration['catalog_tag']}"]))
+     assets=[row for row in bootstrap.get('assets',[]) if row['name']=='catalog.json']
+     if bootstrap.get('draft') or len(assets)!=1 or not 0<assets[0]['size']<32*1024**2:
+@@ -82,6 +83,7 @@
+         output(source_index='verified')
+         progress['phase'] = 'pending_cleanup'
+ 
++    progress['phase'] = 'recovery'
+     recovered = recover(
+         transport,
+         on_commit=lambda commit, state: finalize_index(commit, state, 'recovered'),
+@@ -91,10 +93,12 @@
+         print(json.dumps({'status':'offline_pending_recovered','tags':[commit.tag for commit in recovered],
+                           'new_provider_requests':0,'coverage_complete':False}),flush=True)
+         return
++    progress['phase'] = 'restore_checkpoint'
+     verified = transport.load_latest_verified_state()
+     state = verified[1] if verified else None
+     if verified:
+         publish_index(gh, repo, verified[0], state, args.work)
++    progress['phase'] = 'quota_reservation'
+     budget=reserve_hosted(gh,repo,stream=configuration['stream_id'],catalog_sha256=catalog_hash,
+         run_id=os.environ['GITHUB_RUN_ID'],run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT','1')),
+         work=args.work/'quota',now=datetime.now(timezone.utc))
+@@ -108,12 +112,19 @@
+     http=CaptureHTTP(budget,deadline=deadline)
+     try:
+         credentials=load_credentials(sources=['alpaca','sec','opendart']); client=NativeClients(http,credentials)
++        progress['phase'] = 'acquisition'
+         updated, captures = acquire_tick(
+             catalog, state, {name: client for name in ('alpaca', 'sec', 'opendart')},
+             now=datetime.now(timezone.utc), deadline=deadline, max_steps=20000,
+         )
+         updated['used_calls']=budget.used
+-        commit=transport.publish(build_bundles(captures),updated)
++        progress['phase'] = 'bundle_build'
++        print(json.dumps({'status':'offline_capture_ready','captures':len(captures),
++            'unique_capture_ids':len({capture['capture_id'] for capture,_ in captures}),
++            'reused_capture_observations':updated.get('reused_capture_observations',0)}),flush=True)
++        bundles=build_bundles(captures)
++        progress['phase'] = 'publication'
++        commit=transport.publish(bundles,updated)
+         finalize_index(commit, updated, 'committed')
+         pending, files = transport.pending_publication
+         if acknowledge(transport, pending, commit, files):
+@@ -132,7 +143,7 @@
+         main(progress)
+         return 0
+     except Exception as exc:
+-        details = exc.safe_details() if isinstance(exc, GitHubError) else {}
++        details = error_details(exc)
+         if progress.get('publication_state'):
+             phase = progress['phase']
+             output(**{phase: 'deferred'})
+@@ -150,6 +161,7 @@
+         print(json.dumps({
+             'status': 'offline_publication_deferred' if deferred else 'offline_capture_failed',
+             'error_type': type(exc).__name__,
++            'phase': progress.get('phase', 'configuration'),
+             **details,
+         }), flush=True)
+         return 0 if deferred else 2

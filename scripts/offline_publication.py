@@ -7,6 +7,7 @@ import subprocess
 import time
 from urllib.parse import quote
 import os
+import traceback
 
 
 class GitHubError(RuntimeError):
@@ -34,6 +35,25 @@ def network_failure(stderr):
         b'temporary failure in name resolution', b'network is unreachable', b'context deadline exceeded'))
 
 
+def error_details(exc):
+    """Public contract codes and locations; never exception text or locals."""
+    contracts = {
+        'duplicate capture in publication', 'duplicate capture across archives',
+        'release capture manifest bound exceeded', 'single capture exceeds archive bound',
+        'checkpoint state expansion bound exceeded', 'capture metadata hash mismatch',
+        'capture content hash/bound mismatch', 'catalog identity hash mismatch',
+        'committed source index readback required', 'conflicting replayed capture identity',
+        'published offline release fork requires review',
+        'published offline release chain has missing generation',
+    }
+    details = exc.safe_details() if hasattr(exc, 'safe_details') else {}
+    if isinstance(exc, ValueError) and len(exc.args) == 1 and isinstance(exc.args[0], str) and exc.args[0] in contracts:
+        details['reason'] = exc.args[0].replace(' ', '_').replace('/', '_')
+    details['locations'] = [dict(file=Path(frame.filename).name, line=frame.lineno, function=frame.name)
+        for frame in traceback.extract_tb(exc.__traceback__)[-6:]]
+    return details
+
+
 def output_error(exc, failure_status):
     deferred = getattr(exc, 'retryable', False)
     path = os.environ.get('GITHUB_OUTPUT')
@@ -42,7 +62,7 @@ def output_error(exc, failure_status):
             target.write('publication_state=' + ('deferred' if deferred else 'failed') + '\n')
     print(json.dumps({'status': 'offline_publication_deferred' if deferred else failure_status,
                       'error_type': type(exc).__name__,
-                      **(exc.safe_details() if hasattr(exc, 'safe_details') else {})}), flush=True)
+                      **error_details(exc)}), flush=True)
 
 
 def _operation(endpoint, method):
