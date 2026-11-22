@@ -1,0 +1,156 @@
+--- a/scripts/offline_refresh.py
++++ b/scripts/offline_refresh.py
+@@ -11,7 +11,7 @@
+ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
+ from backtest_data.offline.acquisition import acquire_tick
+ from backtest_data.offline.archives import build_bundles
+-from backtest_data.offline.budget import reserve_hosted
++from backtest_data.offline.budget import reserve_hosted, alpaca_run_credits
+ from backtest_data.offline.contracts import decode
+ from backtest_data.offline.native import CaptureHTTP, NativeClients
+ from backtest_data.offline.transport import GitHubCaptureTransport
+@@ -56,6 +56,63 @@
+         return
+ 
+ 
++def source_progress(state):
++    result = {}
++    for name, value in state.get('sources', {}).items():
++        row = {key: value[key] for key in ('watermark', 'recent_completed_day') if key in value}
++        for key in ('cycle', 'recent_cycle'):
++            if cycle := value.get(key):
++                row[key] = {field: cycle[field] for field in ('start', 'end', 'offset', 'page_no') if field in cycle}
++                row[key]['pending'] = len(cycle.get('pending', ()))
++        row['deferred_filings'] = len(value.get('deferred_filings', {}))
++        result[name] = row
++    return result
++
++
++def collect_publications(catalog, state, clients, budget, transport, *, deadline, progress, on_commit):
++    """Flush bounded transactions, sharing one admitted provider budget and clock."""
++    chunk = 0
++    dart_cache = {}
++    while True:
++        chunk += 1
++        progress.pop('publication_state', None)
++        progress['phase'] = 'acquisition'
++        started = time.monotonic()
++        updated, captures = acquire_tick(catalog, state, clients,
++            now=datetime.now(timezone.utc), deadline=deadline, max_steps=20000, dart_cache=dart_cache)
++        updated['used_calls'] = dict(budget.used)
++        acquired = time.monotonic()
++        progress['phase'] = 'bundle_build'
++        print(json.dumps({'status':'offline_capture_ready', 'chunk':chunk, 'captures':len(captures),
++            'unique_capture_ids':len({capture['capture_id'] for capture,_ in captures}),
++            'reused_capture_observations':updated.get('reused_capture_observations',0)}), flush=True)
++        bundles = build_bundles(captures)
++        built = time.monotonic()
++        progress['phase'] = 'publication'
++        commit = transport.publish(bundles, updated)
++        published = time.monotonic()
++        progress['last_committed_tag'] = commit.tag
++        on_commit(commit, updated)
++        pending, files = transport.pending_publication
++        acknowledged = acknowledge(transport, pending, commit, files)
++        if acknowledged:
++            remove_local(transport, pending)
++        output(pending_cleanup='verified' if acknowledged else 'deferred')
++        print(json.dumps({'status':'offline_capture_committed', 'tag':commit.tag, 'chunk':chunk,
++            'captures':len(captures), 'used_calls':dict(budget.used),
++            'provider_status':updated['provider_status'], 'source_progress':source_progress(updated),
++            'stage_seconds':{'acquisition':round(acquired-started,3),'bundle_build':round(built-acquired,3),
++                'publication':round(published-built,3),'index_cleanup':round(time.monotonic()-published,3)},
++            'coverage_complete':False}), flush=True)
++        capacity_sources = [name for name, value in updated['provider_status'].items()
++            if value.get('status') in {'manifest_deferred', 'storage_deferred'}]
++        can_continue = any(budget.remaining.get(name, 0)>0 for name in capacity_sources)
++        if not acknowledged or not captures or not can_continue or time.monotonic()>=deadline:
++            return
++        state = updated
++        del captures, bundles, files
++
++
+ def main(progress):
+     parser=argparse.ArgumentParser(description=__doc__)
+     parser.add_argument('--work',type=Path,required=True); parser.add_argument('--budget-seconds',type=int)
+@@ -109,31 +166,13 @@
+     deadline=float(hosted_deadline) if hosted_deadline else started+5400
+     if args.budget_seconds is not None:
+         deadline=min(deadline,started+args.budget_seconds) if hosted_deadline else started+args.budget_seconds
++    budget.remaining['alpaca'] = alpaca_run_credits(max(0,deadline-started))
+     http=CaptureHTTP(budget,deadline=deadline)
+     try:
+         credentials=load_credentials(sources=['alpaca','sec','opendart']); client=NativeClients(http,credentials)
+-        progress['phase'] = 'acquisition'
+-        updated, captures = acquire_tick(
+-            catalog, state, {name: client for name in ('alpaca', 'sec', 'opendart')},
+-            now=datetime.now(timezone.utc), deadline=deadline, max_steps=20000,
+-        )
+-        updated['used_calls']=budget.used
+-        progress['phase'] = 'bundle_build'
+-        print(json.dumps({'status':'offline_capture_ready','captures':len(captures),
+-            'unique_capture_ids':len({capture['capture_id'] for capture,_ in captures}),
+-            'reused_capture_observations':updated.get('reused_capture_observations',0)}),flush=True)
+-        bundles=build_bundles(captures)
+-        progress['phase'] = 'publication'
+-        commit=transport.publish(bundles,updated)
+-        finalize_index(commit, updated, 'committed')
+-        pending, files = transport.pending_publication
+-        if acknowledge(transport, pending, commit, files):
+-            remove_local(transport, pending)
+-            output(pending_cleanup='verified')
+-        else:
+-            output(pending_cleanup='deferred')
+-        print(json.dumps({'status':'offline_capture_committed','tag':commit.tag,'captures':len(captures),
+-            'used_calls':budget.used,'provider_status':updated['provider_status'],'coverage_complete':False}))
++        collect_publications(catalog, state, {name:client for name in ('alpaca','sec','opendart')},
++            budget, transport, deadline=deadline, progress=progress,
++            on_commit=lambda commit,state:finalize_index(commit,state,'committed'))
+     finally:http.close()
+ 
+ 
+--- a/src/backtest_data/offline/acquisition.py
++++ b/src/backtest_data/offline/acquisition.py
+@@ -845,7 +845,7 @@
+ 
+ 
+ def acquire_tick(catalog, state, clients, *, now, max_steps=1000, deadline=None, max_capture_bytes=256*1024**2,
+-                 max_capture_manifest_bytes=None):
++                 max_capture_manifest_bytes=None, dart_cache=None):
+     from .contracts import MAX_MANIFEST_BYTES, canonical_bytes
+     from .transport import MAX_ARCHIVES
+     # Reserve control metadata, all bounded asset records, enclosing JSON and
+@@ -874,7 +874,8 @@
+     reused_captures = 0
+     manifest_total = 0
+     from functools import partial
+-    functions = {'alpaca': _alpaca_step, 'sec': _sec_step, 'opendart': partial(_dart_step,dart_cache={})}
++    functions = {'alpaca': _alpaca_step, 'sec': _sec_step,
++        'opendart': partial(_dart_step,dart_cache={} if dart_cache is None else dart_cache)}
+     available = [source for source in SOURCES if source in clients and catalog.get(MEMBERS[source])]
+     for step in range(max_steps):
+         if not available or deadline is not None and time.monotonic() >= deadline: break
+--- a/src/backtest_data/offline/budget.py
++++ b/src/backtest_data/offline/budget.py
+@@ -1,6 +1,7 @@
+ """Pessimistic hosted credit reservations survive failed disposable runners."""
+ from datetime import datetime, timedelta, timezone
+ import json
++from math import isfinite
+ from pathlib import Path
+ import re
+ 
+@@ -15,6 +16,13 @@
+     sec_remote_interval = 1.0
+     dart_local = 17000
+     dart_remote = 2000
++
++
++def alpaca_run_credits(seconds):
++    """Keep the 10-second hosted slice; admit work through the 335-minute window."""
++    if type(seconds) not in (int, float) or seconds < 0 or not isfinite(seconds):
++        raise ValueError('finite nonnegative acquisition window required')
++    return int(min(seconds, 335*60) // LocalSlices.alpaca_remote_interval)
+ 
+ 
+ def _clock(value):

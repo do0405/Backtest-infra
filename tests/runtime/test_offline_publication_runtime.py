@@ -174,7 +174,7 @@ def test_capture_classifies_failures_against_verified_publication(
     monkeypatch.setattr(script, 'GitHubCaptureTransport', lambda *a, **kw: SimpleNamespace(
         load_latest_verified_state=lambda: None, publish=publish, pending_publication=({}, {})))
     monkeypatch.setattr(script, 'recover', lambda *a, **kw: [])
-    monkeypatch.setattr(script, 'reserve_hosted', lambda *a, **kw: SimpleNamespace(used={}))
+    monkeypatch.setattr(script, 'reserve_hosted', lambda *a, **kw: SimpleNamespace(used={},remaining={}))
     monkeypatch.setattr(script, 'CaptureHTTP', lambda *a, **kw: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(script, 'load_credentials', lambda **kw: None)
     monkeypatch.setattr(script, 'NativeClients', lambda *a: object())
