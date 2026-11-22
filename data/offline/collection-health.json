@@ -1,20 +1,25 @@
 {
-  "checked_at": "2026-11-22T07:12:28.622290+00:00",
-  "collection_outcome": "not_run",
+  "checked_at": "2026-11-22T10:34:21.972024+00:00",
+  "collection_outcome": "success",
+  "core_publication": {
+    "pending_cleanup": "verified",
+    "source_index": "verified",
+    "state": "committed"
+  },
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "d696bea2b3062fde343fc884776c17e71d0c75b7",
+  "head_sha": "4d59d7710d04534ab2b87cddf1f2a2ba613dd77e",
   "latest_data_release": {
-    "commit_sha256": "abc119823a723e14da41ceddfd37be7add98c0881e638bd7c137e2014fde7779",
-    "tag": "offline-core-forward-v1-000000175"
+    "commit_sha256": "acca9168a70f49627268df6128e1bd3d8568b2b2ec6b398613b441df95f75642",
+    "tag": "offline-core-forward-v1-000000176"
   },
-  "observed_by_run_id": 44997160625,
-  "requires_user": true,
+  "observed_by_run_id": 45009400177,
+  "requires_user": false,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
-      "attention": "schedule_stale",
+      "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
         "created_at": "2026-11-22T02:11:58Z",
@@ -22,10 +27,10 @@
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-22T02:11:58Z",
-        "id": 44974950490,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-11-22T09:49:26Z",
+        "id": 45009400177,
+        "status": "in_progress"
       },
       "operator_enabled": true,
       "state": "active"
@@ -48,7 +53,7 @@
       "state": "disabled_manually"
     },
     "remote-extended-refresh.yml": {
-      "attention": "schedule_stale",
+      "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
         "created_at": "2026-11-22T02:36:03Z",
@@ -56,10 +61,10 @@
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-22T02:36:03Z",
-        "id": 44976850386,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-11-22T10:14:19Z",
+        "id": 45011447528,
+        "status": "in_progress"
       },
       "operator_enabled": true,
       "state": "active"
