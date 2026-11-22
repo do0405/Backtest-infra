@@ -1,11 +1,12 @@
 {
   "catalog_sha256": "c44fbc9cef2b0eb036a1328a7a10e09665842b17045baf7f1c209f35a40ccabb",
-  "commit_sha256": "acca9168a70f49627268df6128e1bd3d8568b2b2ec6b398613b441df95f75642",
+  "commit_sha256": "2310dbc47da755892d170087793f104a648aee7cc7deb96f797fcb1d754bc74a",
   "coverage_complete": false,
   "format": "offline_source_index_v1",
   "provider_status": {
     "alpaca": {
-      "status": "storage_deferred"
+      "captures": 1,
+      "status": "captured"
     },
     "opendart": {
       "status": "storage_deferred"
@@ -21,5 +22,5 @@
     "sec": "2026-11-20"
   },
   "stream_id": "core-forward-v1",
-  "tag": "offline-core-forward-v1-000000176"
+  "tag": "offline-core-forward-v1-000000177"
 }
