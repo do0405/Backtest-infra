@@ -1,30 +1,30 @@
 {
-  "checked_at": "2026-11-22T16:31:20.119841+00:00",
-  "collection_outcome": "not_run",
+  "checked_at": "2026-11-22T19:26:59.785431+00:00",
+  "collection_outcome": "failure",
   "coverage_complete": false,
-  "event": "schedule",
+  "event": "workflow_dispatch",
   "format": "collection_health_v1",
-  "head_sha": "4d0307cb1137a41d0fd7ed8a6a41f7a5394d211f",
+  "head_sha": "964fcfec70d7848b0d3826a9d67b857a25035373",
   "latest_data_release": {
     "commit_sha256": "acca9168a70f49627268df6128e1bd3d8568b2b2ec6b398613b441df95f75642",
     "tag": "offline-core-forward-v1-000000176"
   },
-  "observed_by_run_id": 45044278293,
+  "observed_by_run_id": 45048152883,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
-      "attention": "schedule_stale",
+      "attention": "schedule_unsuccessful",
       "latest_completed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-22T09:49:26Z",
-        "id": 45009400177,
+        "conclusion": "cancelled",
+        "created_at": "2026-11-22T17:48:28Z",
+        "id": 45051497854,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-22T09:49:26Z",
-        "id": 45009400177,
+        "conclusion": "cancelled",
+        "created_at": "2026-11-22T17:48:28Z",
+        "id": 45051497854,
         "status": "completed"
       },
       "operator_enabled": true,
@@ -48,7 +48,7 @@
       "state": "disabled_manually"
     },
     "remote-extended-refresh.yml": {
-      "attention": "schedule_stale",
+      "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
         "created_at": "2026-11-22T10:14:19Z",
@@ -56,10 +56,10 @@
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-22T10:14:19Z",
-        "id": 45011447528,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-11-22T17:59:34Z",
+        "id": 45052495946,
+        "status": "in_progress"
       },
       "operator_enabled": true,
       "state": "active"
