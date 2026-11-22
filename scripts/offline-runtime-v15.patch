@@ -1,0 +1,38 @@
+--- a/scripts/offline_refresh.py
++++ b/scripts/offline_refresh.py
+@@ -79,7 +79,8 @@
+         progress['phase'] = 'acquisition'
+         started = time.monotonic()
+         updated, captures = acquire_tick(catalog, state, clients,
+-            now=datetime.now(timezone.utc), deadline=deadline, max_steps=20000, dart_cache=dart_cache)
++            now=datetime.now(timezone.utc), deadline=deadline, max_steps=20000, dart_cache=dart_cache,
++            stop_on_capacity=True)
+         updated['used_calls'] = dict(budget.used)
+         acquired = time.monotonic()
+         progress['phase'] = 'bundle_build'
+--- a/src/backtest_data/offline/acquisition.py
++++ b/src/backtest_data/offline/acquisition.py
+@@ -845,7 +845,7 @@
+ 
+ 
+ def acquire_tick(catalog, state, clients, *, now, max_steps=1000, deadline=None, max_capture_bytes=256*1024**2,
+-                 max_capture_manifest_bytes=None, dart_cache=None):
++                 max_capture_manifest_bytes=None, dart_cache=None, stop_on_capacity=False):
+     from .contracts import MAX_MANIFEST_BYTES, canonical_bytes
+     from .transport import MAX_ARCHIVES
+     # Reserve control metadata, all bounded asset records, enclosing JSON and
+@@ -912,12 +912,14 @@
+                 result['provider_status'][source] = {'status': 'manifest_item_too_large'
+                     if manifest_added > max_capture_manifest_bytes else 'manifest_deferred'}
+                 blocked.add(source)
++                if stop_on_capacity and captures and manifest_added<=max_capture_manifest_bytes:break
+                 continue
+             if added + total > max_capture_bytes:
+                 result['sources'][source] = prior
+                 result['provider_status'][source] = {'status': 'storage_item_too_large'
+                     if added > max_capture_bytes else 'storage_deferred'}
+                 blocked.add(source)
++                if stop_on_capacity and captures and added<=max_capture_bytes:break
+                 continue
+             captures.extend(values); total += added; content_hashes.update(additions)
+             capture_identities.update(unique)

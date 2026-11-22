@@ -16,9 +16,9 @@ else:
 SCRIPTS = Path(__file__).resolve().parent
 BUILDS = {
     'core': {
-        'base_tag': 'offline-core-runtime-v13-20261120',
-        'base_sha256': '6b52fb672a2dca4952b805f691517c4726a6c1418f3c833412d2acbddad48582',
-        'patch': 'offline-runtime-v14.patch',
+        'base_tag': 'offline-core-runtime-v14-20261123',
+        'base_sha256': 'dc89f82fe1b4db6ca02186704b4ab2369a66d9638c128caba143199dbe371711',
+        'patch': 'offline-runtime-v15.patch',
         'helpers': ('offline_publication.py', 'offline_outbox.py'),
     },
     'extra': {

@@ -27,6 +27,7 @@ def configured(refresh, monkeypatch, *, acknowledge=True):
     calls=[]
     budget=SimpleNamespace(used={'alpaca':0},remaining={'alpaca':4})
     def collect(catalog,state,clients,**kwargs):
+        assert kwargs['stop_on_capacity'] is True
         calls.append(('collect',deepcopy(state)))
         budget.remaining['alpaca']-=1;budget.used['alpaca']+=1
         offset=(state or {}).get('offset',0)+1
@@ -51,6 +52,39 @@ def test_capacity_flush_continues_from_committed_cursor_and_reuses_run_budget(re
     assert calls[4][1]['offset']==1
     assert [x[1]['used_calls']['alpaca'] for x in calls if x[0]=='publish']==[1,2]
     assert budget.remaining['alpaca']==2
+
+
+@pytest.mark.parametrize('boundary',['storage','manifest'])
+@pytest.mark.parametrize('flush',[True,False])
+def test_capacity_flush_does_not_wait_for_another_sources_empty_traversal(refresh,monkeypatch,boundary,flush):
+    from backtest_data.offline import acquisition as a
+    from backtest_data.offline.contracts import make_capture,canonical_bytes
+    from backtest_data.offline.transport import MAX_ARCHIVES
+    now=datetime(2026,11,23,tzinfo=timezone.utc);calls=[]
+    def price(state,members,client,clock):
+        state['offset']=state.get('offset',0)+1
+        content=('original'+str(state['offset'])).encode()
+        capture=make_capture(source='alpaca',kind='alpaca_bars',
+            entity_id='00179df8-84f3-5ed8-9ea6-469a85bf94aa',captured_at=now,content=content,metadata={})
+        return [(capture,content)]
+    def empty(state,members,client,clock):
+        calls.append('sec');state['offset']=state.get('offset',0)+1
+        return []
+    monkeypatch.setattr(a,'_alpaca_step',price);monkeypatch.setattr(a,'_sec_step',empty)
+    monkeypatch.setattr(a,'_price_has_work',lambda *args:True)
+    monkeypatch.setattr(a,'_financial_has_work',lambda *args:True)
+    catalog=dict(catalog_sha256='a'*64,target_count=17758,output_end='2026-10-07',
+        us_prices=[{}],sec_issuers=[{}],dart_issuers=[])
+    first=price({},None,None,None)[0][0]
+    limits={'max_capture_bytes':10} if boundary=='storage' else {'max_capture_manifest_bytes':
+        len(canonical_bytes({'asset':f'captures-{MAX_ARCHIVES:04d}.zip','capture':first}))+1}
+    state,captures=a.acquire_tick(catalog,None,{'alpaca':object(),'sec':object()},
+        now=now,max_steps=8,**({'stop_on_capacity':True} if flush else {}),**limits)
+    expected=1 if flush else 6
+    assert calls==['sec']*expected and len(captures)==1
+    assert state['sources']['alpaca']['offset']==1
+    assert state['sources']['sec']['offset']==expected
+    assert state['provider_status']['alpaca']['status']==boundary+'_deferred'
 
 
 def test_unacknowledged_publication_stops_before_more_provider_requests(refresh,monkeypatch):
