@@ -1,36 +1,31 @@
 {
-  "checked_at": "2026-11-23T07:47:41.793117+00:00",
-  "collection_outcome": "deferred",
-  "core_publication": {
-    "pending_cleanup": null,
-    "source_index": null,
-    "state": "deferred"
-  },
+  "checked_at": "2026-11-23T15:06:42.347158+00:00",
+  "collection_outcome": "not_run",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "a8648b78175c52ead8da8791f4f2ef61e8bd682b",
+  "head_sha": "090cf31fba3dc44367efa7da598be7b185ad7eab",
   "latest_data_release": {
     "commit_sha256": "4f1a6299db989dbf6ce0c71b45784ff43a283afb57ff919ac92b0370ff4ebad9",
     "tag": "offline-core-forward-v1-000000188"
   },
-  "observed_by_run_id": 45131704065,
+  "observed_by_run_id": 45201487166,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
-      "attention": null,
+      "attention": "schedule_stale",
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-22T23:34:46Z",
-        "id": 45084006223,
+        "created_at": "2026-11-23T07:31:17Z",
+        "id": 45131704065,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": null,
+        "conclusion": "success",
         "created_at": "2026-11-23T07:31:17Z",
         "id": 45131704065,
-        "status": "in_progress"
+        "status": "completed"
       },
       "operator_enabled": true,
       "state": "active"
@@ -56,14 +51,14 @@
       "attention": "schedule_stale",
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-22T23:46:16Z",
-        "id": 45085021001,
+        "created_at": "2026-11-23T08:05:53Z",
+        "id": 45135888582,
         "status": "completed"
       },
       "latest_observed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-22T23:46:16Z",
-        "id": 45085021001,
+        "created_at": "2026-11-23T08:05:53Z",
+        "id": 45135888582,
         "status": "completed"
       },
       "operator_enabled": true,
