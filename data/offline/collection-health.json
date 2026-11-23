@@ -1,15 +1,20 @@
 {
-  "checked_at": "2026-11-23T15:06:42.347158+00:00",
-  "collection_outcome": "not_run",
+  "checked_at": "2026-11-23T17:17:02.114010+00:00",
+  "collection_outcome": "success",
+  "core_publication": {
+    "pending_cleanup": "verified",
+    "source_index": "verified",
+    "state": "committed"
+  },
   "coverage_complete": false,
-  "event": "schedule",
+  "event": "workflow_dispatch",
   "format": "collection_health_v1",
   "head_sha": "090cf31fba3dc44367efa7da598be7b185ad7eab",
   "latest_data_release": {
-    "commit_sha256": "4f1a6299db989dbf6ce0c71b45784ff43a283afb57ff919ac92b0370ff4ebad9",
-    "tag": "offline-core-forward-v1-000000188"
+    "commit_sha256": "acae039993f654f57dd884581945238b706c033d13a49327dac7cb9952bcf0c8",
+    "tag": "offline-core-forward-v1-000000192"
   },
-  "observed_by_run_id": 45201487166,
+  "observed_by_run_id": 45199176689,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
