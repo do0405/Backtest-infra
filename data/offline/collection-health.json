@@ -1,16 +1,21 @@
 {
-  "checked_at": "2026-11-25T14:44:45.790695+00:00",
-  "collection_outcome": "not_run",
+  "checked_at": "2026-11-25T15:46:13.148107+00:00",
+  "collection_outcome": "deferred",
+  "core_publication": {
+    "pending_cleanup": "verified",
+    "source_index": "verified",
+    "state": "deferred"
+  },
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
   "head_sha": "9b3063a8c1e75c9f54f49437fff1cdf007d9e322",
   "latest_data_release": {
-    "commit_sha256": "1a07c303928e53369ce055d8c7afb4234bc54d63a8937851cc52b690a0b80a40",
-    "tag": "offline-core-forward-v1-000000196"
+    "commit_sha256": "1ff922e18c78a319cc3f3c90d891a50257b23cc96cc55ebf311e579a205d05d0",
+    "tag": "offline-core-forward-v1-000000197"
   },
-  "observed_by_run_id": 45637379878,
-  "requires_user": true,
+  "observed_by_run_id": 45632315642,
+  "requires_user": false,
   "run_attempt": 1,
   "workflows": {
     "offline-core-refresh.yml": {
@@ -48,7 +53,7 @@
       "state": "disabled_manually"
     },
     "remote-extended-refresh.yml": {
-      "attention": "schedule_stale",
+      "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
         "created_at": "2026-11-25T02:44:10Z",
@@ -56,10 +61,10 @@
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": "success",
-        "created_at": "2026-11-25T02:44:10Z",
-        "id": 45535060258,
-        "status": "completed"
+        "conclusion": null,
+        "created_at": "2026-11-25T14:51:51Z",
+        "id": 45638710163,
+        "status": "in_progress"
       },
       "operator_enabled": true,
       "state": "active"
