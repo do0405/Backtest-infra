@@ -1,20 +1,15 @@
 {
-  "checked_at": "2026-11-26T00:21:45.783704+00:00",
-  "collection_outcome": "success",
-  "core_publication": {
-    "pending_cleanup": null,
-    "source_index": "verified",
-    "state": "recovered"
-  },
+  "checked_at": "2026-11-26T00:33:47.920345+00:00",
+  "collection_outcome": "not_run",
   "coverage_complete": false,
   "event": "schedule",
   "format": "collection_health_v1",
-  "head_sha": "da4c1c798b5f7b704d5ec1863af6d7e27ad56996",
+  "head_sha": "c3041d9f1725f0a7cac8fe94a9ef54f467b6fcf7",
   "latest_data_release": {
     "commit_sha256": "d4767a2b3950585090734429d50ddd2b4c440eeeb8c8e62ec7b7442eb2c062dd",
     "tag": "offline-core-forward-v1-000000198"
   },
-  "observed_by_run_id": 45727791222,
+  "observed_by_run_id": 45729609192,
   "requires_user": true,
   "run_attempt": 1,
   "workflows": {
@@ -22,15 +17,15 @@
       "attention": null,
       "latest_completed_schedule": {
         "conclusion": "success",
-        "created_at": "2026-11-25T14:16:47Z",
-        "id": 45632315642,
+        "created_at": "2026-11-26T00:18:27Z",
+        "id": 45727791222,
         "status": "completed"
       },
       "latest_observed_schedule": {
-        "conclusion": null,
+        "conclusion": "success",
         "created_at": "2026-11-26T00:18:27Z",
         "id": 45727791222,
-        "status": "in_progress"
+        "status": "completed"
       },
       "operator_enabled": true,
       "state": "active"
