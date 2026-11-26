@@ -1,16 +1,15 @@
 {
   "catalog_sha256": "c44fbc9cef2b0eb036a1328a7a10e09665842b17045baf7f1c209f35a40ccabb",
-  "commit_sha256": "1ff922e18c78a319cc3f3c90d891a50257b23cc96cc55ebf311e579a205d05d0",
+  "commit_sha256": "d4767a2b3950585090734429d50ddd2b4c440eeeb8c8e62ec7b7442eb2c062dd",
   "coverage_complete": false,
   "format": "offline_source_index_v1",
   "provider_status": {
     "alpaca": {
-      "status": "manifest_deferred"
+      "captures": 24,
+      "status": "captured"
     },
     "opendart": {
-      "code": "temporary_transport_error",
-      "error_type": "ProviderError",
-      "status": "deferred"
+      "status": "storage_deferred"
     },
     "sec": {
       "captures": 0,
@@ -23,5 +22,5 @@
     "sec": "2026-11-21"
   },
   "stream_id": "core-forward-v1",
-  "tag": "offline-core-forward-v1-000000197"
+  "tag": "offline-core-forward-v1-000000198"
 }
